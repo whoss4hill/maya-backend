@@ -60,3 +60,9 @@ def handle(headers: dict, update: dict, state: State, now: float = None):
     state.times.append(now)
     state.last_update_id = uid
     return "ok", text.strip()[:2000]
+
+
+def outbound_chat_id(bound_id):
+    """The only chat id Maya may ever send to: the currently bound owner chat (None -> send nothing).
+    Callers must use this for every reply, never a chat id taken from an incoming update."""
+    return bound_id if isinstance(bound_id, int) and bound_id > 0 else None
