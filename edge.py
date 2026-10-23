@@ -96,7 +96,7 @@ class App:
                 print("tts parse error", type(ex).__name__)
         return None
 
-    FALLBACK_MODELS = ("gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-lite-latest")
+    FALLBACK_MODELS = ("gemini-3.7-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-lite-latest", "gemini-3.8-flash")
 
     async def _gemini(self, prompt, history=None):
         """Free-tier quotas are per model and small (primary showed limit 20/day): on 429/404 try the next model.
@@ -300,6 +300,15 @@ class App:
                             print("tg_sendDocument status", r.status_code)
                             if r.status_code >= 400:
                                 await self._tg_send(chat_id, "PDF could not be sent.")
+                elif re.match(r"^/?call\s+\S", low) and hasattr(self.state, "push_command"):
+                    target = re.sub(r"^/?call\s+", "", text, flags=re.I).strip()[:80]
+                    import uuid
+                    cid = uuid.uuid4().hex[:12]
+                    res = await self.state.push_command({"id": cid, "cmd": "call", "target": target})
+                    if res == "sent":
+                        await self._tg_send(chat_id, "Sent to the phone (id " + cid + "). Waiting for the phone to confirm; nothing is confirmed until it replies.")
+                    else:
+                        await self._tg_send(chat_id, "Phone app is not connected right now. Nothing was dialled and nothing is queued.")
                 elif low.startswith("/voice"):
                     vt = text[6:].strip()
                     if not vt:
