@@ -187,11 +187,12 @@ def _sb_raise_for_error(res: httpx.Response):
 # 5,000 free queries/month shared across the project, then paid. To avoid ever reaching paid usage
 # this server keeps a conservative monthly counter and turns the tool off at MAYA_SEARCH_MONTHLY_CAP.
 # The counter is in-process (resets on restart), so the cap is a guard, not an accounting system.
-# MAYA_WEB_SEARCH=0 turns the feature off.
+# Default OFF: set MAYA_WEB_SEARCH=1 only after the owning Google project's billing/quota is known;
+# the in-process counter cannot enforce a provider-side cap.
 # -------------------------------------------------------------
 import time as _time
 
-WEB_SEARCH_ON = os.environ.get("MAYA_WEB_SEARCH", "1") != "0"
+WEB_SEARCH_ON = os.environ.get("MAYA_WEB_SEARCH", "0") == "1"  # OFF unless explicitly enabled
 SEARCH_MONTHLY_CAP = int(os.environ.get("MAYA_SEARCH_MONTHLY_CAP", "2000"))
 _search_used = {"month": "", "n": 0}
 
