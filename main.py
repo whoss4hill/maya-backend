@@ -179,6 +179,71 @@ def _sb_raise_for_error(res: httpx.Response):
         raise RuntimeError(f"supabase HTTP {res.status_code}")
 
 
+
+# -------------------------------------------------------------
+# Live web search (Gemini "Grounding with Google Search").
+# Docs: https://ai.google.dev/gemini-api/docs/generate-content/google-search
+# Billing note (same page, Pricing): Gemini 3+ bills per search query the model runs;
+# 5,000 free queries/month shared across the project, then paid. To avoid ever reaching paid usage
+# this server keeps a conservative monthly counter and turns the tool off at MAYA_SEARCH_MONTHLY_CAP.
+# The counter is in-process (resets on restart), so the cap is a guard, not an accounting system.
+# MAYA_WEB_SEARCH=0 turns the feature off.
+# -------------------------------------------------------------
+import time as _time
+
+WEB_SEARCH_ON = os.environ.get("MAYA_WEB_SEARCH", "1") != "0"
+SEARCH_MONTHLY_CAP = int(os.environ.get("MAYA_SEARCH_MONTHLY_CAP", "2000"))
+_search_used = {"month": "", "n": 0}
+
+
+def _gemini_payload(prompt: str) -> dict:
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+    if _search_allowed():
+        payload["tools"] = [{"google_search": {}}]
+    return payload
+
+
+def _search_month() -> str:
+    return _time.strftime("%Y-%m", _time.gmtime())
+
+
+def _search_allowed() -> bool:
+    if not WEB_SEARCH_ON:
+        return False
+    if _search_used["month"] != _search_month():
+        _search_used.update(month=_search_month(), n=0)
+    return _search_used["n"] < SEARCH_MONTHLY_CAP
+
+
+def _search_record(data: dict) -> list:
+    """Counts the queries the model actually ran and returns [(title, uri)] sources (max 5, de-duplicated)."""
+    try:
+        gm = data["candidates"][0].get("groundingMetadata") or {}
+    except Exception:
+        return []
+    queries = gm.get("webSearchQueries") or []
+    if queries:
+        if _search_used["month"] != _search_month():
+            _search_used.update(month=_search_month(), n=0)
+        _search_used["n"] += len([q for q in queries if str(q).strip()])
+    out, seen = [], set()
+    for ch in gm.get("groundingChunks") or []:
+        web = (ch or {}).get("web") or {}
+        uri = web.get("uri")
+        if uri and uri not in seen:
+            seen.add(uri)
+            out.append((web.get("title") or uri, uri))
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _with_sources(reply: str, sources: list) -> str:
+    if not sources:
+        return reply
+    return reply + "\n\nSources:\n" + "\n".join(f"- {t}: {u}" for t, u in sources)
+
+
 # -------------------------------------------------------------
 # POST /v1/chat - the main thinking loop.
 # Body: { message: string }
@@ -223,7 +288,7 @@ async def chat(request: Request):
     gemini_res = http.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
         headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-        json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
+        json=_gemini_payload(prompt),
     )
     if gemini_res.status_code != 200:
         # Status only - never log the response body (may echo the prompt).
@@ -235,6 +300,7 @@ async def chat(request: Request):
         reply = "".join(p.get("text", "") for p in parts).strip() or "..."
     except Exception:
         reply = "..."
+    reply = _with_sources(reply, _search_record(gemini_data))
 
     ins = http.post(
         f"{SUPABASE_URL}/rest/v1/conversations",
