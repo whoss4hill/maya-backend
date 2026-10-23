@@ -1,0 +1,18 @@
+{
+  "name": "maya-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Maya backend API - Render free tier. Holds the Gemini key and Supabase service-role key server-side.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2"
+  }
+}
