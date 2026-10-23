@@ -1,11 +1,5 @@
-"""Cloudflare Python Worker entry for the Maya backend (STAGING PORT, NOT DEPLOYED, NOT VERIFIED ON THE PLATFORM).
-
-- HTTP API: the existing FastAPI app (main.py) through the ASGI bridge, using net.Http (fetch) instead of httpx.
-- Telegram security state: ONE Durable Object (SQLite-backed) so replay guard, rate limit, pairing lockout
-  and the On/Off switch are strongly consistent. Logic lives in state_core.py (tested locally).
-Unverified here: that the ASGI bridge, os.environ population and the DO RPC calls behave as written on the
-platform. Those are checked only by a real staging deploy.
-"""
+"""Cloudflare Python Worker entry (STAGING, plain router: no FastAPI import, to stay under the Free 10 ms CPU limit).
+Telegram security state lives in ONE Durable Object (SQLite-backed, strongly consistent): state_core.Core."""
 import json, os
 from workers import WorkerEntrypoint, DurableObject, Response
 
@@ -38,21 +32,12 @@ class MayaState(DurableObject):
         core = await self._core(); core.revoke(); await self._save(core)
 
     async def status(self):
-        core = await self._core()
-        b = core.bound_id
+        core = await self._core(); b = core.bound_id
         return json.dumps({"bound": b is not None, "enabled": core.data["tg"]["owner_enabled"],
                            "bound_suffix": str(b)[-4:] if b else None})
 
 
-def _load_env(env):
-    for k in dir(env):
-        v = getattr(env, k, None)
-        if isinstance(v, str) and k.isupper():
-            os.environ.setdefault(k, v)
-
-
 class DOState:
-    """Adapter with the same async interface as main.LocalState, backed by the single Durable Object."""
     def __init__(self, stub):
         self.stub = stub
 
@@ -72,11 +57,32 @@ class DOState:
         return json.loads(await self.stub.status())
 
 
+NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "GEMINI_API_KEY", "GEMINI_MODEL", "MAYA_OWNER_USER_ID",
+         "MAYA_TELEGRAM_SECRET", "TELEGRAM_BOT_TOKEN", "MAYA_TELEGRAM_ENABLED", "MAYA_REQUIRE_JWT_MODE")
+
+
+def _load_env(env):
+    for k in NAMES:
+        try:
+            v = getattr(env, k)
+        except Exception:
+            continue
+        if v is not None and not isinstance(v, bool):
+            os.environ[k] = str(v)
+
+
 class Default(WorkerEntrypoint):
     async def fetch(self, request):
         _load_env(self.env)
-        import asgi
-        import main
-        from main import app
-        main.STATE = DOState(self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya")))
-        return await asgi.fetch(app, request.js_object, self.env)
+        from urllib.parse import urlparse
+        from edge import App
+        from net import Http
+        path = urlparse(request.url).path
+        if path == "/health":
+            return Response(json.dumps({"ok": True, "service": "maya-backend-edge"}), headers={"content-type": "application/json"})
+        app = App(http=Http(), state=DOState(self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya"))))
+        body = await request.text() if request.method in ("POST", "PUT", "PATCH") else ""
+        status, payload = await app.handle(request.method, path, dict(request.headers), body)
+        if payload is None:
+            return Response("", status=status)
+        return Response(json.dumps(payload), status=status, headers={"content-type": "application/json"})
