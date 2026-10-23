@@ -5,6 +5,7 @@ handle() is pure logic over an injected Http and state, so it is testable withou
 import json, os, re
 
 from net import Http
+from pdfgen import make_pdf, unsupported_chars, UnsupportedText
 
 
 def _env(k, d=""):
@@ -144,14 +145,46 @@ class App:
             return 200, {"revoked": True}
         return self.err(404, "not_found")
 
+    async def _tg_send(self, chat_id, text):
+        return await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
+                                    json={"chat_id": chat_id, "text": text[:4000]})
+
     async def _tg_webhook(self, headers, update):
         status, text, chat_id = await self.state.update(headers, update)
-        if status == "ok" and chat_id is not None and text:
-            try:
-                reply = await self._gemini("You are Maya, the owner's personal agent.\nOwner says: " + text)
-                if reply and self.tg_token and isinstance(chat_id, int):
-                    await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
-                                         json={"chat_id": chat_id, "text": reply[:4000]})
-            except Exception:
-                pass
+        if not (self.tg_token and isinstance(chat_id, int)):
+            return 200, {}
+        try:
+            if status == "paired":
+                await self._tg_send(chat_id, "Paired. Maya is now connected to this chat only.")
+            elif status == "ok" and text:
+                low = text.lower()
+                if low.startswith("/pdf"):
+                    topic = text[4:].strip()
+                    if unsupported_chars(topic):
+                        await self._tg_send(chat_id, "PDF supports English/Latin text only for now. Hindi and other scripts need a font that is not added yet, so I did not create a PDF.")
+                    elif not topic:
+                        await self._tg_send(chat_id, "Usage: /pdf <what the document should contain>")
+                    else:
+                        body = await self._gemini("Write a clear, well organised plain-text document (no markdown symbols) for: " + topic)
+                        if not body:
+                            await self._tg_send(chat_id, "Could not generate the document right now.")
+                        else:
+                            try:
+                                pdf = make_pdf(topic[:80], body)
+                            except UnsupportedText:
+                                await self._tg_send(chat_id, "The text contains characters the PDF font cannot show (for example Hindi). No PDF was created.")
+                                return 200, {}
+                            r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                                          {"chat_id": chat_id}, "maya.pdf", pdf)
+                            print("tg_sendDocument status", r.status_code)
+                            if r.status_code >= 400:
+                                await self._tg_send(chat_id, "PDF could not be sent.")
+                elif low.startswith("/image") or low.startswith("/video"):
+                    await self._tg_send(chat_id, "Image and video generation are not enabled yet.")
+                else:
+                    reply = await self._gemini("You are Maya, the owner's personal agent.\nOwner says: " + text)
+                    if reply:
+                        await self._tg_send(chat_id, reply)
+        except Exception as ex:
+            print("telegram handler error", type(ex).__name__)
         return 200, {}
