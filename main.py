@@ -104,6 +104,111 @@ async def require_user(request: Request):
         return None, _err(401, "invalid_token")
     return user, None
 
+# MAYA backend API (section 10 of the spec) - Python/FastAPI port
+# Small FastAPI service for Render's free tier.
+# The Android app never calls Gemini or the database directly -
+# it calls this API. The Gemini key and the Supabase
+# service-role key live here only, as environment variables.
+#
+# HTTP contract is identical to the previous Node/Express
+# version: same paths, same request/response JSON.
+# =============================================================
+import os
+import sys
+from datetime import datetime, timezone
+
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")  # server-side only, NEVER in the APK
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")                        # server-side only, NEVER in the APK
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not GEMINI_API_KEY:
+    print("Missing env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and GEMINI_API_KEY are required.", file=sys.stderr)
+    sys.exit(1)
+
+SUPABASE_URL = SUPABASE_URL.rstrip("/")
+
+# Service-role key: bypasses RLS, so EVERY query below is
+# explicitly scoped with user_id=eq.<caller id>. Never expose
+# this key to the app.
+SB_HEADERS = {
+    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+}
+
+http = httpx.Client(timeout=30.0)
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def _err(status: int, code: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": code})
+
+
+# -------------------------------------------------------------
+# 404 + error handling.
+# Logging rule from the spec: enough detail to debug, but NEVER
+# keys, tokens, or user message bodies - so we log only the
+# method, path, status and the error message.
+# -------------------------------------------------------------
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code == 404:
+        return _err(404, "not_found")
+    if exc.status_code == 405:
+        return _err(404, "not_found")
+    return _err(exc.status_code, "internal_error")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return _err(400, "bad_request")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    print(f"{request.method} {request.url.path} -> 500: {exc}", file=sys.stderr)
+    return _err(500, "internal_error")
+
+
+# -------------------------------------------------------------
+# Health check - Render + uptime monitors ping this.
+# -------------------------------------------------------------
+@app.get("/health")
+async def health():
+    now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return {"ok": True, "service": "maya-backend", "time": now}
+
+
+# -------------------------------------------------------------
+# Auth: the app sends the user's Supabase sign-in token as
+# "Authorization: Bearer <token>". We verify it and get the
+# user. The anon key never reaches this server.
+# -------------------------------------------------------------
+async def require_user(request: Request):
+    header = request.headers.get("authorization", "")
+    token = header[7:] if header.startswith("Bearer ") else None
+    if not token:
+        return None, _err(401, "missing_token")
+    try:
+        res = http.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={"apikey": SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {token}"},
+        )
+    except Exception as e:
+        raise e
+    if res.status_code != 200:
+        return None, _err(401, "invalid_token")
+    user = res.json()
+    if not user or not user.get("id"):
+        return None, _err(401, "invalid_token")
+    return user, None
+
 
 def _sb_raise_for_error(res: httpx.Response):
     if res.status_code >= 400:
