@@ -15,3 +15,7 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-3.6-flash
+      - key: MAYA_OWNER_USER_ID
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
