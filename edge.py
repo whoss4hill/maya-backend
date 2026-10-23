@@ -2,7 +2,8 @@
 over the Free plan's 10 ms limit). Same behaviour as main.py for: /health, /v1/chat, /v1/memories, /v1/tasks, Telegram.
 Search is not included (OFF by design). The /auth/reset page is not ported yet (main.py still serves it on Render).
 handle() is pure logic over an injected Http and state, so it is testable without Cloudflare."""
-import json, os, re
+import re
+import asyncio, json, os, re
 
 from net import Http
 from pdfgen import make_pdf, unsupported_chars, UnsupportedText
@@ -51,19 +52,41 @@ class App:
         return u, token, None
 
     def _gem(self, prompt):
-        return {"contents": [{"parts": [{"text": prompt}]}]}
+        import datetime
+        today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        rule = ("You are Maya. Today's date is " + today + " (UTC). You have NO internet, browsing, search or other tools in this chat. "
+                "Never claim to have checked a website, searched, or verified anything live. For anything that may have changed "
+                "(latest versions, news, prices, dates), say plainly that you cannot check live and that your knowledge may be outdated; "
+                "give any answer only as 'from memory, may be outdated' and never invent links or release dates.")
+        return {"system_instruction": {"parts": [{"text": rule}]}, "contents": [{"parts": [{"text": prompt}]}]}
+
+    FALLBACK_MODELS = ("gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-lite-latest")
 
     async def _gemini(self, prompt):
-        r = await self.http.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
-            headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt))
-        if r.status_code != 200:
-            return None
-        try:
-            parts = r.json()["candidates"][0]["content"]["parts"]
-            return "".join(p.get("text", "") for p in parts).strip() or "..."
-        except Exception:
-            return "..."
+        """Free-tier quotas are per model and small (primary showed limit 20/day): on 429/404 try the next model.
+        503/500 are retried once after a short wait. Still free tier only: no billing, no search."""
+        models = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
+        r = None
+        for model in models:
+            for attempt in range(2):
+                r = await self.http.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt))
+                self.last_gemini_status = r.status_code
+                print("gemini", model, "status", r.status_code, "chars", len(r.text))
+                if r.status_code in (500, 503) and attempt == 0:
+                    await asyncio.sleep(2)
+                    continue
+                break
+            if r.status_code == 200:
+                try:
+                    parts = r.json()["candidates"][0]["content"]["parts"]
+                    return "".join(p.get("text", "") for p in parts).strip() or "..."
+                except Exception:
+                    return "..."
+            if r.status_code not in (429, 404, 500, 503):
+                break
+        return None
 
     # ---- router
     async def handle(self, method, path, headers, body):
@@ -140,6 +163,13 @@ class App:
                 return self.err(400, "on_required")
             await self.state.set_enabled(data["on"])
             return 200, {"enabled": data["on"]}
+        if path == "/v1/telegram/selftest" and method == "POST":
+            st = await self.state.status()
+            bid = await self.state.bound()
+            if not bid or not data.get("text"):
+                return self.err(400, "not_bound_or_no_text")
+            await self._tg_process("ok", str(data["text"])[:2000], bid)
+            return 200, {"ran": True}
         if path == "/v1/telegram/revoke" and method == "POST":
             await self.state.revoke()
             return 200, {"revoked": True}
@@ -149,10 +179,65 @@ class App:
         return await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
                                     json={"chat_id": chat_id, "text": text[:4000]})
 
+    @staticmethod
+    def chunks(text, size=3900, max_chunks=10):
+        out, rest = [], text
+        while rest and len(out) < max_chunks:
+            if len(rest) <= size:
+                out.append(rest); rest = ""; break
+            cut = rest.rfind("\n", 0, size)
+            cut = cut if cut > size // 2 else size
+            out.append(rest[:cut]); rest = rest[cut:].lstrip("\n")
+        if rest:
+            out[-1] = out[-1][: size - 40] + "\n[truncated: reply too long]"
+        return out
+
+    async def _tg_send_long(self, chat_id, text):
+        last = None
+        for c in self.chunks(text):
+            last = await self._tg_send(chat_id, c)
+            if last.status_code >= 400:
+                break
+        return last
+
     async def _tg_webhook(self, headers, update):
         status, text, chat_id = await self.state.update(headers, update)
+        print("tg update status", status)
         if not (self.tg_token and isinstance(chat_id, int)):
             return 200, {}
+        await self._tg_process(status, text, chat_id)
+        return 200, {}
+
+    async def _action(self, chat_id, action):
+        try:
+            r = await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendChatAction", json={"chat_id": chat_id, "action": action})
+            print("tg chatAction", action, r.status_code)
+        except Exception:
+            pass
+
+    async def _heartbeat(self, chat_id, action):
+        for _ in range(12):  # at most about 48 s, one refresh every 4 s (Telegram shows the action for 5 s)
+            await asyncio.sleep(4)
+            await self._action(chat_id, action)
+
+    async def _tg_process(self, status, text, chat_id):
+        if status == "ok" and text and not text.lower().startswith(("/image", "/video")):
+            action = "upload_document" if text.lower().startswith("/pdf") and text[4:].strip() else "typing"
+            await self._action(chat_id, action)
+            hb = None
+            try:
+                hb = asyncio.ensure_future(self._heartbeat(chat_id, action))
+            except Exception:
+                hb = None
+            try:
+                await self._tg_process_inner(status, text, chat_id)
+            finally:
+                if hb is not None:
+                    hb.cancel()
+        else:
+            await self._tg_process_inner(status, text, chat_id)
+
+    async def _tg_process_inner(self, status, text, chat_id):
         try:
             if status == "paired":
                 await self._tg_send(chat_id, "Paired. Maya is now connected to this chat only.")
@@ -167,7 +252,7 @@ class App:
                     else:
                         body = await self._gemini("Write a clear, well organised plain-text document (no markdown symbols) for: " + topic)
                         if not body:
-                            await self._tg_send(chat_id, "Could not generate the document right now.")
+                            await self._tg_send(chat_id, "Could not generate the document right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again in a minute.")
                         else:
                             try:
                                 pdf = make_pdf(topic[:80], body)
@@ -175,7 +260,7 @@ class App:
                                 await self._tg_send(chat_id, "The text contains characters the PDF font cannot show (for example Hindi). No PDF was created.")
                                 return 200, {}
                             r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
-                                                          {"chat_id": chat_id}, "maya.pdf", pdf)
+                                                          {"chat_id": chat_id, "caption": "PDF: " + topic[:100]}, (re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:40] or "document") + ".pdf", pdf)
                             print("tg_sendDocument status", r.status_code)
                             if r.status_code >= 400:
                                 await self._tg_send(chat_id, "PDF could not be sent.")
@@ -184,7 +269,15 @@ class App:
                 else:
                     reply = await self._gemini("You are Maya, the owner's personal agent.\nOwner says: " + text)
                     if reply:
-                        await self._tg_send(chat_id, reply)
+                        r = await self._tg_send_long(chat_id, reply)
+                        print("tg sendMessage status", r.status_code, "chunks", len(self.chunks(reply)))
+                        if r.status_code >= 400:
+                            await self._tg_send(chat_id, "Reply could not be delivered in full. Please try again.")
+                    else:
+                        await self._tg_send(chat_id, "Maya could not get an answer from the AI right now (error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again.")
         except Exception as ex:
-            print("telegram handler error", type(ex).__name__)
-        return 200, {}
+            print("telegram handler error", type(ex).__name__, str(ex).replace(self.tg_token, "<token>")[:300])
+            try:
+                await self._tg_send(chat_id, "Something went wrong while handling that. Please try again.")
+            except Exception:
+                pass
