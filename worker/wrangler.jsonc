@@ -1,0 +1,13 @@
+{
+  // Maya backend as an ISOLATED Worker. Staging only. Never reuse another project's bindings or secrets.
+  "name": "maya-backend-staging",
+  "main": "src/entry.py",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["python_workers"],
+  "vars": { "MAYA_REQUIRE_JWT_MODE": "1" },
+  "durable_objects": { "bindings": [{ "name": "MAYA_STATE", "class_name": "MayaState" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MayaState"] }],
+  // Secrets are set with `wrangler secret put` (never in this file):
+  // SUPABASE_URL, SUPABASE_ANON_KEY, GEMINI_API_KEY, MAYA_OWNER_USER_ID, MAYA_TELEGRAM_SECRET, TELEGRAM_BOT_TOKEN
+  // Switches stay OFF unless set: MAYA_WEB_SEARCH, MAYA_TELEGRAM_ENABLED, MAYA_TOOL_*
+}
