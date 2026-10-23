@@ -17,7 +17,7 @@ class Resp:
 
 
 try:  # Cloudflare Python Workers (Pyodide) only
-    from js import fetch as _js_fetch, Object as _JsObject, FormData as _FormData, Blob as _Blob  # type: ignore
+    from js import fetch as _js_fetch, Object as _JsObject, FormData as _FormData, Blob as _Blob, Uint8Array as _Uint8Array  # type: ignore
     from pyodide.ffi import to_js as _to_js  # type: ignore
     ON_WORKERS = True
 except Exception:
@@ -55,7 +55,8 @@ class Http:
             fd = _FormData.new()
             for k, v in fields.items():
                 fd.append(k, str(v))
-            blob = _Blob.new([_to_js(data)], _to_js({"type": mime}, dict_converter=_JsObject.fromEntries))
+            u8 = _Uint8Array.new(_to_js(list(data)))
+            blob = _Blob.new(_to_js([u8]), _to_js({"type": mime}, dict_converter=_JsObject.fromEntries))
             fd.append(field, blob, filename)
             r = await _js_fetch(url, _to_js({"method": "POST", "body": fd}, dict_converter=_JsObject.fromEntries))
             return Resp(int(r.status), await r.text())
