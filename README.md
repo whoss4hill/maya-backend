@@ -1,16 +1,19 @@
 # Maya Backend - Setup Guide (aapke liye, step by step)
 
+> Note (2026-10-23): backend ab Python (FastAPI + uvicorn) me hai. Purana Node.js version `legacy-node/` me archive hai. API ka contract (paths, request/response JSON) bilkul same hai - app side koi change nahi chahiye.
+
 Ye file batati hai ki Maya ka backend khud kaise set up karna hai.
 Developer hone ki zaroorat nahi hai - bas clicks hain, lagbhag 20-25 minute.
 Kisi bhi step pe atko to Instinct se pooch lo.
 
 Is folder me ye files hain:
 - `schema.sql`     - database ke tables banane wala SQL (Supabase me run karna hai)
-- `server.js`      - backend API ka code (Render pe chalega)
-- `package.json`   - backend ko chalane ke liye zaroori list
+- `main.py`        - backend API ka code, Python/FastAPI (Render pe chalega)
+- `requirements.txt` - Python packages ki list (Render khud install karta hai)
 - `render.yaml`    - Render ke liye ready-made settings
 - `.env.example`   - kaunsi secret keys chahiye, unki list (asli keys kabhi file me NAHI dalni)
 - `.gitignore`     - taaki secrets git me galti se na chale jayein
+- `legacy-node/`    - purana Node.js (Express) version ka archive - sirf reference ke liye, Render ab ye use NAHI karta
 
 ---
 
