@@ -4,9 +4,24 @@ import json, os
 from workers import WorkerEntrypoint, DurableObject, Response
 
 
+NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "GEMINI_API_KEY", "GEMINI_MODEL", "MAYA_OWNER_USER_ID",
+         "MAYA_TELEGRAM_SECRET", "TELEGRAM_BOT_TOKEN", "MAYA_TELEGRAM_ENABLED", "MAYA_REQUIRE_JWT_MODE")
+
+
+def _load_env(env):
+    for k in NAMES:
+        try:
+            v = getattr(env, k)
+        except Exception:
+            continue
+        if v is not None and not isinstance(v, bool):
+            os.environ[k] = str(v)
+
+
 class MayaState(DurableObject):
     def __init__(self, ctx, env):
         self.ctx, self.env = ctx, env
+        _load_env(env)
 
     async def _core(self):
         from state_core import Core
@@ -34,7 +49,8 @@ class MayaState(DurableObject):
     async def status(self):
         core = await self._core(); b = core.bound_id
         return json.dumps({"bound": b is not None, "enabled": core.data["tg"]["owner_enabled"],
-                           "bound_suffix": str(b)[-4:] if b else None})
+                           "bound_suffix": str(b)[-4:] if b else None,
+                           "bound_sha256_12": __import__("hashlib").sha256(str(b).encode()).hexdigest()[:12] if b else None})
 
 
 class DOState:
@@ -57,18 +73,13 @@ class DOState:
         return json.loads(await self.stub.status())
 
 
-NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "GEMINI_API_KEY", "GEMINI_MODEL", "MAYA_OWNER_USER_ID",
-         "MAYA_TELEGRAM_SECRET", "TELEGRAM_BOT_TOKEN", "MAYA_TELEGRAM_ENABLED", "MAYA_REQUIRE_JWT_MODE")
-
-
-def _load_env(env):
-    for k in NAMES:
-        try:
-            v = getattr(env, k)
-        except Exception:
-            continue
-        if v is not None and not isinstance(v, bool):
-            os.environ[k] = str(v)
+def _hdrs(request):
+    h = {}
+    for k in ("authorization", "x-telegram-bot-api-secret-token", "content-type"):
+        v = request.headers.get(k)
+        if v:
+            h[k] = str(v)
+    return h
 
 
 class Default(WorkerEntrypoint):
@@ -82,7 +93,7 @@ class Default(WorkerEntrypoint):
             return Response(json.dumps({"ok": True, "service": "maya-backend-edge"}), headers={"content-type": "application/json"})
         app = App(http=Http(), state=DOState(self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya"))))
         body = await request.text() if request.method in ("POST", "PUT", "PATCH") else ""
-        status, payload = await app.handle(request.method, path, dict(request.headers), body)
+        status, payload = await app.handle(request.method, path, _hdrs(request), body)
         if payload is None:
             return Response("", status=status)
         return Response(json.dumps(payload), status=status, headers={"content-type": "application/json"})
