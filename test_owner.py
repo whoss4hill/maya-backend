@@ -12,7 +12,8 @@ def load(owner):
     return main
 
 def run(main, status, body):
-    main.http = type("H", (), {"get": lambda self, *a, **k: httpx.Response(status, json=body)})()
+    async def _get(self, *a, **k): return main.Resp(status, __import__("json").dumps(body))
+    main.http = type("H", (), {"get": _get})()
     return asyncio.run(main.require_user(FakeReq("t")))
 
 def test_owner_allowed():
