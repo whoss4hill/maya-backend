@@ -9,16 +9,16 @@ def load(**env):
     import main
     return main
 
-def test_tool_enabled_by_default():
+def test_off_by_default():
     m = load()
-    assert m._gemini_payload("hi")["tools"] == [{"google_search": {}}]
-
-def test_switch_off():
-    m = load(MAYA_WEB_SEARCH="0")
     assert "tools" not in m._gemini_payload("hi")
 
+def test_explicit_on():
+    m = load(MAYA_WEB_SEARCH="1")
+    assert m._gemini_payload("hi")["tools"] == [{"google_search": {}}]
+
 def test_cap_turns_tool_off_and_counts_queries():
-    m = load(MAYA_SEARCH_MONTHLY_CAP="2")
+    m = load(MAYA_WEB_SEARCH="1", MAYA_SEARCH_MONTHLY_CAP="2")
     data = {"candidates": [{"groundingMetadata": {"webSearchQueries": ["a", "b", " "], "groundingChunks": []}}]}
     m._search_record(data)
     assert m._search_used["n"] == 2
