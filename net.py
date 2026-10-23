@@ -17,7 +17,7 @@ class Resp:
 
 
 try:  # Cloudflare Python Workers (Pyodide) only
-    from js import fetch as _js_fetch, Object as _JsObject  # type: ignore
+    from js import fetch as _js_fetch, Object as _JsObject, FormData as _FormData, Blob as _Blob  # type: ignore
     from pyodide.ffi import to_js as _to_js  # type: ignore
     ON_WORKERS = True
 except Exception:
@@ -47,6 +47,22 @@ class Http:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self.timeout)
         r = await self._client.request(method, url, headers=headers, content=body)
+        return Resp(r.status_code, r.text)
+
+    async def post_file(self, url, fields, filename, data, mime="application/pdf", field="document"):
+        """multipart/form-data POST with one file (Telegram sendDocument)."""
+        if ON_WORKERS:
+            fd = _FormData.new()
+            for k, v in fields.items():
+                fd.append(k, str(v))
+            blob = _Blob.new([_to_js(data)], _to_js({"type": mime}, dict_converter=_JsObject.fromEntries))
+            fd.append(field, blob, filename)
+            r = await _js_fetch(url, _to_js({"method": "POST", "body": fd}, dict_converter=_JsObject.fromEntries))
+            return Resp(int(r.status), await r.text())
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        r = await self._client.post(url, data={k: str(v) for k, v in fields.items()}, files={field: (filename, data, mime)})
         return Resp(r.status_code, r.text)
 
     async def get(self, url, **kw):
