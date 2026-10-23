@@ -149,3 +149,14 @@ def test_chat_history_passed_and_no_intro_rule(app):
     assert len(gens[0]["contents"]) == 1 and len(gens[1]["contents"]) == 3
     assert gens[1]["contents"][0] == {"role": "user", "parts": [{"text": "hi"}]} and gens[1]["contents"][1]["role"] == "model"
     assert "never introduce yourself" in gens[1]["system_instruction"]["parts"][0]["text"]
+
+
+def test_call_command_offline_and_sent(app):
+    sent = []
+    async def push(cmd): sent.append(cmd); return "offline"
+    app.state.push_command = push
+    run(app._tg_process("ok", "call Mom", 42))
+    assert sent and sent[0]["cmd"] == "call" and sent[0]["target"] == "Mom"
+    assert not any("generateContent" in u for _, u, _ in app.http.calls)
+    msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
+    assert "Nothing was dialled" in msgs[-1]
