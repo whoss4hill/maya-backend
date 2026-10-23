@@ -123,3 +123,29 @@ def test_gemini_retry_and_typing(app, monkeypatch):
 def test_gemini_payload_has_truthfulness_rule(app):
     p = app._gem("hi"); s = p["system_instruction"]["parts"][0]["text"]
     assert "NO internet" in s and "Never claim to have checked" in s and p["contents"][0]["parts"][0]["text"] == "hi"
+
+
+def test_voice_tts_wraps_pcm_and_sends_audio(app, monkeypatch):
+    import base64
+    pcm = b"\x00\x01" * 100
+    async def post(u, **k):
+        app.http.calls.append(("POST", u, k))
+        if "3.8-flash-tts" in u: return Resp(429, "{}")
+        return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16; rate=24000; channels=1", "data": base64.b64encode(pcm).decode()}}]}}]}))
+    app.http.post = post
+    w = run(app._tts("hello")); assert w[:4] == b"RIFF" and pcm in w
+    run(app._tg_process("ok", "/voice hello", 42))
+    f = [k for m, _, k in app.http.calls if m == "FILE" and "sendAudio" in _]
+    assert f and f[0]["filename"] == "maya-voice.wav" and f[0]["data"][:4] == b"RIFF"
+
+
+def test_chat_history_passed_and_no_intro_rule(app):
+    app.state.hist = []
+    async def history(): return list(app.state.hist)
+    async def add_turn(u, m): app.state.hist += [["user", u], ["model", m]]
+    app.state.history, app.state.add_turn = history, add_turn
+    run(app._tg_process("ok", "hi", 42)); run(app._tg_process("ok", "aur batao", 42))
+    gens = [k["json"] for m, u, k in app.http.calls if "generateContent" in u]
+    assert len(gens[0]["contents"]) == 1 and len(gens[1]["contents"]) == 3
+    assert gens[1]["contents"][0] == {"role": "user", "parts": [{"text": "hi"}]} and gens[1]["contents"][1]["role"] == "model"
+    assert "never introduce yourself" in gens[1]["system_instruction"]["parts"][0]["text"]
