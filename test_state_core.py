@@ -17,7 +17,7 @@ def roundtrip(c): return Core(json.loads(json.dumps(c.data)))  # persisted betwe
 
 def test_pairing_then_command_survive_persistence():
     now = time.time(); c = Core(); code = c.pair_start(now)
-    assert c.telegram_update(H, upd(1, 6358090699, "/pair WRONG", now), now)[0] == "ignored"
+    assert c.telegram_update(H, upd(1, 1234567890, "/pair WRONG", now), now)[0] == "ignored"
     c = roundtrip(c)
     assert c.telegram_update(H, upd(2, 111, f"/pair {code}", now), now)[0] == "paired" and c.bound_id == 111
     c = roundtrip(c)
