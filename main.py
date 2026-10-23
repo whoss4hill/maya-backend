@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -29,6 +29,21 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not GEMINI_API_KEY:
 
 SUPABASE_URL = SUPABASE_URL.rstrip("/")
 
+# Single-owner enforcement. MAYA_OWNER_USER_ID is the immutable Supabase auth
+# user id (uuid) of the one permitted user. It is NOT the email (emails can be
+# changed/unverified). Unset or empty => fail closed: every request is denied.
+MAYA_OWNER_USER_ID = os.environ.get("MAYA_OWNER_USER_ID", "").strip().lower()
+
+# Public (anon) key, used only by the password-reset page. It is public by design
+# (it ships in any client); never put the service-role key here.
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+
+
+def is_owner(user: dict) -> bool:
+    if not MAYA_OWNER_USER_ID:
+        return False
+    return str(user.get("id", "")).strip().lower() == MAYA_OWNER_USER_ID
+
 # Service-role key: bypasses RLS, so EVERY query below is
 # explicitly scoped with user_id=eq.<caller id>. Never expose
 # this key to the app.
@@ -39,6 +54,56 @@ SB_HEADERS = {
 
 http = httpx.Client(timeout=30.0)
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+# -------------------------------------------------------------
+# Password reset landing page (Supabase recovery email redirects here).
+# The recovery token arrives in the URL fragment (#access_token=...&type=recovery),
+# which browsers never send to the server. The page removes it from the address
+# bar at once, then calls Supabase PUT /auth/v1/user with that token and the
+# PUBLIC anon key. No service-role key, no token logging, no server-side state.
+# -------------------------------------------------------------
+_RESET_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Maya - set a new password</title>
+<style>body{font-family:system-ui,sans-serif;max-width:380px;margin:12vh auto;padding:0 16px}
+input,button{width:100%;padding:12px;margin:8px 0;font-size:16px;box-sizing:border-box}
+#m{min-height:1.4em}</style></head><body>
+<h2>Set a new password</h2>
+<form id="f" hidden><input id="p" type="password" minlength="8" autocomplete="new-password" placeholder="New password (8+ characters)" required>
+<input id="c" type="password" minlength="8" autocomplete="new-password" placeholder="Confirm password" required>
+<button id="b" type="submit">Save password</button></form><p id="m"></p>
+<script>
+(function(){
+var U="__SUPABASE_URL__",K="__SUPABASE_ANON_KEY__";
+var h=new URLSearchParams(location.hash.replace(/^#/,""));
+var t=h.get("access_token"),ty=h.get("type"),e=h.get("error_description");
+history.replaceState(null,"",location.pathname);
+var m=document.getElementById("m"),f=document.getElementById("f");
+if(e){m.textContent="This link is not valid or has expired. Request a new reset email.";return;}
+if(!t||ty!=="recovery"){m.textContent="Open this page from the reset email link.";return;}
+f.hidden=false;
+f.addEventListener("submit",function(ev){ev.preventDefault();
+var p=document.getElementById("p").value,c=document.getElementById("c").value;
+if(p!==c){m.textContent="Passwords do not match.";return;}
+if(p.length<8){m.textContent="Use at least 8 characters.";return;}
+document.getElementById("b").disabled=true;m.textContent="Saving...";
+fetch(U+"/auth/v1/user",{method:"PUT",headers:{"apikey":K,"Authorization":"Bearer "+t,"Content-Type":"application/json"},body:JSON.stringify({password:p})})
+.then(function(r){if(r.ok){f.hidden=true;m.textContent="Password updated. You can sign in to Maya now.";}
+else{document.getElementById("b").disabled=false;m.textContent="Could not update the password. The link may have expired; request a new reset email.";}})
+.catch(function(){document.getElementById("b").disabled=false;m.textContent="Network error. Try again.";});
+});})();
+</script></body></html>"""
+
+
+@app.get("/auth/reset", response_class=HTMLResponse, include_in_schema=False)
+def auth_reset():
+    if not SUPABASE_ANON_KEY:
+        return HTMLResponse("Password reset page is not configured.", status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    body = _RESET_HTML.replace("__SUPABASE_URL__", SUPABASE_URL).replace("__SUPABASE_ANON_KEY__", SUPABASE_ANON_KEY)
+    return HTMLResponse(body, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+                                       "X-Content-Type-Options": "nosniff"})
 
 
 def _err(status: int, code: str) -> JSONResponse:
@@ -102,6 +167,10 @@ async def require_user(request: Request):
     user = res.json()
     if not user or not user.get("id"):
         return None, _err(401, "invalid_token")
+    # The token was verified by Supabase Auth above (signature, expiry, project).
+    # Now require the verified identity to be the configured owner.
+    if not is_owner(user):
+        return None, _err(403, "not_authorized")
     return user, None
 
 
