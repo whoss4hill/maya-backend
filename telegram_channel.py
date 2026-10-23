@@ -41,9 +41,11 @@ def _cfg():
     }
 
 
-def handle(headers: dict, update: dict, state: State, now: float = None):
+def handle(headers: dict, update: dict, state: State, now: float = None, owner: str = None):
     """Returns (status, command_text_or_None). status: ok | disabled | bad_secret | ignored | replay | rate_limited."""
     c = _cfg()
+    if owner is not None:
+        c["owner"] = str(owner)  # the paired (bound) chat id supplied by the caller
     if not c["on"] or not c["secret"] or not c["owner"].isdigit():
         return "disabled", None
     got = {k.lower(): v for k, v in (headers or {}).items()}.get("x-telegram-bot-api-secret-token", "")
