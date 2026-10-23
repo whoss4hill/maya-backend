@@ -46,6 +46,9 @@ class MayaState(DurableObject):
     async def revoke(self):
         core = await self._core(); core.revoke(); await self._save(core)
 
+    async def bound(self):
+        core = await self._core(); return core.bound_id
+
     async def status(self):
         core = await self._core(); b = core.bound_id
         return json.dumps({"bound": b is not None, "enabled": core.data["tg"]["owner_enabled"],
@@ -71,6 +74,10 @@ class DOState:
 
     async def status(self):
         return json.loads(await self.stub.status())
+
+    async def bound(self):
+        b = await self.stub.bound()
+        return int(b) if b is not None else None
 
 
 def _hdrs(request):
