@@ -12,7 +12,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-import httpx
+from net import Http, Resp
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -23,8 +23,15 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")  # serve
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")                        # server-side only, NEVER in the APK
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY or not GEMINI_API_KEY:
-    print("Missing env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and GEMINI_API_KEY are required.", file=sys.stderr)
+_ANON = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+# SUPABASE_SERVICE_ROLE_KEY is optional when SUPABASE_ANON_KEY is set (the caller's JWT + RLS are used instead).
+REQUIRE_JWT_MODE = os.environ.get("MAYA_REQUIRE_JWT_MODE", "0") == "1"
+if REQUIRE_JWT_MODE and (not _ANON or SUPABASE_SERVICE_ROLE_KEY):
+    # JWT mode must never silently fall back to (or coexist with) the service_role key.
+    print("MAYA_REQUIRE_JWT_MODE=1 needs SUPABASE_ANON_KEY and no SUPABASE_SERVICE_ROLE_KEY.", file=sys.stderr)
+    sys.exit(1)
+if not SUPABASE_URL or not (SUPABASE_SERVICE_ROLE_KEY or _ANON) or not GEMINI_API_KEY:
+    print("Missing env vars: SUPABASE_URL, SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY) and GEMINI_API_KEY are required.", file=sys.stderr)
     sys.exit(1)
 
 SUPABASE_URL = SUPABASE_URL.rstrip("/")
@@ -47,12 +54,17 @@ def is_owner(user: dict) -> bool:
 # Service-role key: bypasses RLS, so EVERY query below is
 # explicitly scoped with user_id=eq.<caller id>. Never expose
 # this key to the app.
-SB_HEADERS = {
-    "apikey": SUPABASE_SERVICE_ROLE_KEY,
-    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-}
+def _sb(user: dict) -> dict:
+    """Headers for Supabase REST. With an anon key configured the CALLER's own JWT is used, so Postgres
+    row level security applies (least privilege, no service_role key needed). Only if no anon key is set
+    does it fall back to the service-role key (every query is still scoped with user_id=eq.<id>)."""
+    if REQUIRE_JWT_MODE and not user.get("_token"):
+        raise RuntimeError("jwt mode: no caller token")
+    if SUPABASE_ANON_KEY and user.get("_token"):
+        return {"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {user['_token']}"}
+    return {"apikey": SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}"}
 
-http = httpx.Client(timeout=30.0)
+http = Http(timeout=30.0)
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 
@@ -156,9 +168,9 @@ async def require_user(request: Request):
     if not token:
         return None, _err(401, "missing_token")
     try:
-        res = http.get(
+        res = await http.get(
             f"{SUPABASE_URL}/auth/v1/user",
-            headers={"apikey": SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {token}"},
+            headers={"apikey": SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {token}"},
         )
     except Exception as e:
         raise e
@@ -171,10 +183,11 @@ async def require_user(request: Request):
     # Now require the verified identity to be the configured owner.
     if not is_owner(user):
         return None, _err(403, "not_authorized")
+    user["_token"] = token
     return user, None
 
 
-def _sb_raise_for_error(res: httpx.Response):
+def _sb_raise_for_error(res: Resp):
     if res.status_code >= 400:
         raise RuntimeError(f"supabase HTTP {res.status_code}")
 
@@ -266,9 +279,9 @@ async def chat(request: Request):
     if not message:
         return _err(400, "message_required")
 
-    res = http.get(
+    res = await http.get(
         f"{SUPABASE_URL}/rest/v1/memories",
-        headers=SB_HEADERS,
+        headers=_sb(user),
         params={
             "select": "kind,content",
             "user_id": f"eq.{user['id']}",
@@ -286,7 +299,7 @@ async def chat(request: Request):
         + f"Owner says: {message}"
     )
 
-    gemini_res = http.post(
+    gemini_res = await http.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
         headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
         json=_gemini_payload(prompt),
@@ -303,9 +316,9 @@ async def chat(request: Request):
         reply = "..."
     reply = _with_sources(reply, _search_record(gemini_data))
 
-    ins = http.post(
+    ins = await http.post(
         f"{SUPABASE_URL}/rest/v1/conversations",
-        headers={**SB_HEADERS, "Content-Type": "application/json"},
+        headers={**_sb(user), "Content-Type": "application/json"},
         json=[
             {"user_id": user["id"], "role": "user", "text": message},
             {"user_id": user["id"], "role": "maya", "text": reply},
@@ -324,9 +337,9 @@ async def list_memories(request: Request):
     user, err = await require_user(request)
     if err:
         return err
-    res = http.get(
+    res = await http.get(
         f"{SUPABASE_URL}/rest/v1/memories",
-        headers=SB_HEADERS,
+        headers=_sb(user),
         params={
             "select": "id,kind,content,source,created_at,last_used_at",
             "user_id": f"eq.{user['id']}",
@@ -350,9 +363,9 @@ async def create_memory(request: Request):
     kind, content, source = body.get("kind"), body.get("content"), body.get("source")
     if not kind or not content:
         return _err(400, "kind_and_content_required")
-    res = http.post(
+    res = await http.post(
         f"{SUPABASE_URL}/rest/v1/memories",
-        headers={**SB_HEADERS, "Content-Type": "application/json", "Prefer": "return=representation"},
+        headers={**_sb(user), "Content-Type": "application/json", "Prefer": "return=representation"},
         params={"select": "id"},
         json={"user_id": user["id"], "kind": kind, "content": content, "source": source or "chat"},
     )
@@ -366,9 +379,9 @@ async def delete_memory(memory_id: str, request: Request):
     if err:
         return err
     # "Forget completely": hard delete, no archive.
-    res = http.delete(
+    res = await http.delete(
         f"{SUPABASE_URL}/rest/v1/memories",
-        headers=SB_HEADERS,
+        headers=_sb(user),
         params={"id": f"eq.{memory_id}", "user_id": f"eq.{user['id']}"},
     )
     _sb_raise_for_error(res)
@@ -383,9 +396,9 @@ async def list_tasks(request: Request):
     user, err = await require_user(request)
     if err:
         return err
-    res = http.get(
+    res = await http.get(
         f"{SUPABASE_URL}/rest/v1/tasks",
-        headers=SB_HEADERS,
+        headers=_sb(user),
         params={
             "select": "id,title,status,due,notes,created_at,updated_at",
             "user_id": f"eq.{user['id']}",
@@ -409,14 +422,120 @@ async def create_task(request: Request):
     title, due, notes = body.get("title"), body.get("due"), body.get("notes")
     if not title:
         return _err(400, "title_required")
-    res = http.post(
+    res = await http.post(
         f"{SUPABASE_URL}/rest/v1/tasks",
-        headers={**SB_HEADERS, "Content-Type": "application/json", "Prefer": "return=representation"},
+        headers={**_sb(user), "Content-Type": "application/json", "Prefer": "return=representation"},
         params={"select": "id"},
         json={"user_id": user["id"], "title": title, "due": due or None, "notes": notes or None},
     )
     _sb_raise_for_error(res)
     return {"id": res.json()[0]["id"]}
+
+
+# -------------------------------------------------------------
+# Telegram control (owner-only; OFF unless MAYA_TELEGRAM_ENABLED=1). Staging port, not live.
+# State (replay guard, pairing, On/Off) goes through STATE: in-memory Core locally, one Durable Object on Workers.
+# Telegram commands run WITHOUT a Supabase user JWT, so they get no memory/conversation access (Gemini only).
+# -------------------------------------------------------------
+import json as _json
+from state_core import Core
+
+
+class LocalState:
+    def __init__(self):
+        self.core = Core()
+
+    async def update(self, headers, update):
+        return self.core.telegram_update(headers, update)
+
+    async def pair_start(self):
+        return self.core.pair_start()
+
+    async def set_enabled(self, on):
+        self.core.set_enabled(on)
+
+    async def revoke(self):
+        self.core.revoke()
+
+    async def status(self):
+        return {"bound": self.core.bound_id is not None, "enabled": self.core.data["tg"]["owner_enabled"],
+                "bound_suffix": (str(self.core.bound_id)[-4:] if self.core.bound_id else None)}
+
+
+STATE = LocalState()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+
+
+async def _telegram_send(chat_id: int, text: str):
+    if not TELEGRAM_BOT_TOKEN or not isinstance(chat_id, int):
+        return
+    await http.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": text[:4000]})
+
+
+@app.post("/telegram/webhook", include_in_schema=False)
+async def telegram_webhook(request: Request):
+    try:
+        update = await request.json()
+    except Exception:
+        update = {}
+    status, text, chat_id = await STATE.update(dict(request.headers), update if isinstance(update, dict) else {})
+    # Always 200 and an empty body: Telegram retries on errors and strangers learn nothing.
+    if status == "ok" and chat_id is not None and text:
+        try:
+            r = await http.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+                headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+                json=_gemini_payload("You are Maya, the owner's personal agent.\nOwner says: " + text))
+            reply = "..."
+            if r.status_code == 200:
+                parts = r.json()["candidates"][0]["content"]["parts"]
+                reply = "".join(p.get("text", "") for p in parts).strip() or "..."
+            await _telegram_send(chat_id, reply)
+        except Exception:
+            pass
+    return JSONResponse({}, status_code=200)
+
+
+@app.get("/v1/telegram/status")
+async def telegram_status(request: Request):
+    user, err = await require_user(request)
+    if err:
+        return err
+    return await STATE.status()
+
+
+@app.post("/v1/telegram/pair/start")
+async def telegram_pair_start(request: Request):
+    user, err = await require_user(request)
+    if err:
+        return err
+    return {"code": await STATE.pair_start(), "expires_in": 600}
+
+
+@app.post("/v1/telegram/toggle")
+async def telegram_toggle(request: Request):
+    user, err = await require_user(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or not isinstance(body.get("on"), bool):
+        return _err(400, "on_required")
+    await STATE.set_enabled(body["on"])
+    return {"enabled": body["on"]}
+
+
+@app.post("/v1/telegram/revoke")
+async def telegram_revoke(request: Request):
+    user, err = await require_user(request)
+    if err:
+        return err
+    await STATE.revoke()
+    return {"revoked": True}
+
 
 
 # Catch-all 404 for unmatched paths (matches the Node version).
