@@ -59,7 +59,8 @@ class Core:
         if bound is None or rebind:
             status = self._unbound(headers, update, st, now)
             self._save_state(st)
-            return status, None, None  # a pairing message never carries a command or a reply target
+            # a pairing message never carries a command; only a successful pairing gets a fixed ack to the new bound chat
+            return status, None, (self.bound_id if status == "paired" else None)
         status, text = handle(headers, update, st, now=now, owner=str(bound))
         self._save_state(st)
         return status, text, (bound if status == "ok" else None)
