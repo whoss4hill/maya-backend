@@ -11,17 +11,25 @@ Rules enforced here (all default-deny):
     every other sender gets no reply at all (silent drop), so the bot reveals nothing to strangers;
  4. update_id must be higher than the last accepted one (replay/duplicate guard);
  5. at most MAYA_TELEGRAM_RATE messages per 60 s (default 20); text capped at 2000 chars;
- 6. text is a command from the owner only through this check; forwarded messages and anything from
+ 6. owner On/Off switch: when Off every valid update is consumed and dropped (no action, no reply), so
+    commands sent while Off can never run after re-enabling; commands older than 5 min are dropped as stale.
+    Off stops NEW commands only; an action already started is not undone, callers must re-check
+    state.owner_enabled before each further step and report honestly what had already happened.
+ 7. text is a command from the owner only through this check; forwarded messages and anything from
     other chats/channels are never treated as commands.
 The bot token and secret live in server env only. Messages to the owner use the same chat id.
 """
 import hmac, os, time
 
 
+MAX_AGE_S = 300  # a command older than this when it arrives is dropped, never executed late
+
+
 class State:
     def __init__(self):
         self.last_update_id = 0
         self.times = []
+        self.owner_enabled = True   # the owner's in-app On/Off switch (set only by the authenticated owner)
 
 
 def _cfg():
@@ -44,6 +52,10 @@ def handle(headers: dict, update: dict, state: State, now: float = None):
     uid = update.get("update_id")
     if not isinstance(uid, int) or uid <= state.last_update_id:
         return "replay", None
+    if not state.owner_enabled:
+        # Off: consume the update so it can never run later; no reply, no action. Bound id/limits are untouched.
+        state.last_update_id = uid
+        return "off", None
     msg = update.get("message")
     if not isinstance(msg, dict):
         return "ignored", None
@@ -54,6 +66,10 @@ def handle(headers: dict, update: dict, state: State, now: float = None):
             or "forward_origin" in msg or "forward_date" in msg):
         return "ignored", None
     now = time.time() if now is None else now
+    d = msg.get("date")
+    if isinstance(d, int) and now - d > MAX_AGE_S:
+        state.last_update_id = uid
+        return "stale", None
     state.times = [t for t in state.times if now - t < 60]
     if len(state.times) >= c["rate"]:
         return "rate_limited", None
