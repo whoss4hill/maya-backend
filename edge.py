@@ -51,18 +51,54 @@ class App:
             return None, None, self.err(403, "not_authorized")
         return u, token, None
 
-    def _gem(self, prompt):
+    def _gem(self, prompt, history=None):
         import datetime
         today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        rule = ("You are Maya. Today's date is " + today + " (UTC). You have NO internet, browsing, search or other tools in this chat. "
+        rule = ("You are Maya, Sahil's personal assistant, chatting with him on Telegram. This is an ongoing conversation: never introduce yourself "
+                "or say Namaste/hello again unless he greets you first or asks who you are. Answer directly and briefly in natural Roman Hinglish "
+                "(match his language; use English or other content languages only when he asks for them, e.g. code or English text). "
+                "Never end with generic 'how can I help' lines. You know nothing about him beyond this chat. "
+                "Today's date is " + today + " (UTC). You have NO internet, browsing, search or other tools in this chat. "
                 "Never claim to have checked a website, searched, or verified anything live. For anything that may have changed "
                 "(latest versions, news, prices, dates), say plainly that you cannot check live and that your knowledge may be outdated; "
                 "give any answer only as 'from memory, may be outdated' and never invent links or release dates.")
-        return {"system_instruction": {"parts": [{"text": rule}]}, "contents": [{"parts": [{"text": prompt}]}]}
+        return {"system_instruction": {"parts": [{"text": rule}]}, "contents": [{"role": r, "parts": [{"text": t}]} for r, t in (history or [])] + [{"role": "user", "parts": [{"text": prompt}]}]}
+
+    TTS_MODELS = ("gemini-3.8-flash-tts", "gemini-3.1-flash-tts-preview")
+
+    async def _tts(self, text):
+        """Free-tier Gemini TTS -> WAV bytes (None on failure). Output is a WAV file, not an OGG/Opus voice note."""
+        import base64, io, wave
+        for model in self.TTS_MODELS:
+            r = await self.http.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key},
+                json={"contents": [{"parts": [{"text": text}]}], "generationConfig": {"responseModalities": ["AUDIO"],
+                      "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}}})
+            self.last_gemini_status = r.status_code
+            print("tts", model, "status", r.status_code)
+            if r.status_code != 200:
+                continue
+            try:
+                inl = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+                raw = base64.b64decode(inl["data"])
+                if raw[:4] == b"RIFF":
+                    return raw
+                rate = 24000
+                for part in inl.get("mimeType", "").split(";"):
+                    if part.strip().startswith("rate="):
+                        rate = int(part.strip()[5:])
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as w:
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(raw)
+                return buf.getvalue()
+            except Exception as ex:
+                print("tts parse error", type(ex).__name__)
+        return None
 
     FALLBACK_MODELS = ("gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-flash-lite-latest")
 
-    async def _gemini(self, prompt):
+    async def _gemini(self, prompt, history=None):
         """Free-tier quotas are per model and small (primary showed limit 20/day): on 429/404 try the next model.
         503/500 are retried once after a short wait. Still free tier only: no billing, no search."""
         models = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
@@ -71,7 +107,7 @@ class App:
             for attempt in range(2):
                 r = await self.http.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt))
+                    headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt, history))
                 self.last_gemini_status = r.status_code
                 print("gemini", model, "status", r.status_code, "chars", len(r.text))
                 if r.status_code in (500, 503) and attempt == 0:
@@ -222,7 +258,7 @@ class App:
 
     async def _tg_process(self, status, text, chat_id):
         if status == "ok" and text and not text.lower().startswith(("/image", "/video")):
-            action = "upload_document" if text.lower().startswith("/pdf") and text[4:].strip() else "typing"
+            action = "upload_document" if text.lower().startswith("/pdf") and text[4:].strip() else ("record_voice" if text.lower().startswith("/voice") and text[6:].strip() else "typing")
             await self._action(chat_id, action)
             hb = None
             try:
@@ -264,11 +300,42 @@ class App:
                             print("tg_sendDocument status", r.status_code)
                             if r.status_code >= 400:
                                 await self._tg_send(chat_id, "PDF could not be sent.")
+                elif low.startswith("/voice"):
+                    vt = text[6:].strip()
+                    if not vt:
+                        await self._tg_send(chat_id, "Usage: /voice <text to speak>")
+                    elif len(vt) > 1500:
+                        await self._tg_send(chat_id, "Text is too long for one voice clip (max 1500 characters).")
+                    else:
+                        wav = await self._tts(vt)
+                        if not wav:
+                            await self._tg_send(chat_id, "Could not generate the audio right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + ").")
+                        else:
+                            r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendAudio",
+                                                          {"chat_id": chat_id, "title": "Maya voice"}, "maya-voice.wav", wav, mime="audio/wav", field="audio")
+                            print("tg_sendAudio status", r.status_code)
+                            if r.status_code >= 400:
+                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                                              {"chat_id": chat_id}, "maya-voice.wav", wav, mime="audio/wav")
+                                print("tg_sendDocument(wav) status", r.status_code)
+                                if r.status_code >= 400:
+                                    await self._tg_send(chat_id, "Audio could not be sent.")
                 elif low.startswith("/image") or low.startswith("/video"):
                     await self._tg_send(chat_id, "Image and video generation are not enabled yet.")
                 else:
-                    reply = await self._gemini("You are Maya, the owner's personal agent.\nOwner says: " + text)
+                    hist = []
+                    try:
+                        hist = await self.state.history() if hasattr(self.state, "history") else []
+                    except Exception as ex:
+                        print("history read error", type(ex).__name__)
+                    reply = await self._gemini(text, hist)
+                    print("history turns", len(hist) // 2)
                     if reply:
+                        try:
+                            if hasattr(self.state, "add_turn"):
+                                await self.state.add_turn(text, reply)
+                        except Exception as ex:
+                            print("history write error", type(ex).__name__)
                         r = await self._tg_send_long(chat_id, reply)
                         print("tg sendMessage status", r.status_code, "chunks", len(self.chunks(reply)))
                         if r.status_code >= 400:
