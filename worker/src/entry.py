@@ -2,6 +2,7 @@
 Telegram security state lives in ONE Durable Object (SQLite-backed, strongly consistent): state_core.Core."""
 import json, os
 from workers import WorkerEntrypoint, DurableObject, Response
+import time, uuid
 
 
 NAMES = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "GEMINI_API_KEY", "GEMINI_MODEL", "MAYA_OWNER_USER_ID",
@@ -53,6 +54,57 @@ class MayaState(DurableObject):
         raw = await self.ctx.storage.get("hist")
         return raw if raw else "[]"
 
+    # ---- phone socket: one authenticated owner socket, event push (no polling), no offline queue ----
+    async def fetch(self, request):
+        from js import WebSocketPair
+        for old in self.ctx.getWebSockets():  # single bound owner device: newest connection wins
+            try:
+                old.close(1000, "replaced")
+            except Exception:
+                pass
+        pair = WebSocketPair.new()
+        client, server = pair.object_values()
+        self.ctx.acceptWebSocket(server)
+        return Response(None, status=101, web_socket=client)
+
+    async def push_command(self, cmd_json):
+        socks = list(self.ctx.getWebSockets())
+        if not socks:
+            return "offline"
+        cmd = json.loads(cmd_json)
+        cmd["exp"] = int(time.time()) + 60
+        pend = json.loads(await self.ctx.storage.get("pend") or "{}")
+        pend = {k: v for k, v in pend.items() if v > time.time()}
+        pend[cmd["id"]] = cmd["exp"]
+        await self.ctx.storage.put("pend", json.dumps(pend))
+        socks[0].send(json.dumps(cmd))
+        return "sent"
+
+    async def webSocketMessage(self, ws, message):
+        try:
+            m = json.loads(message if isinstance(message, str) else bytes(message).decode())
+        except Exception:
+            return
+        if not isinstance(m, dict) or "ack" not in m:
+            return
+        pend = json.loads(await self.ctx.storage.get("pend") or "{}")
+        if m["ack"] not in pend:  # unknown/expired/replayed command id: ignore
+            return
+        del pend[m["ack"]]
+        await self.ctx.storage.put("pend", json.dumps(pend))
+        core = await self._core(); b = core.bound_id
+        if b:
+            from net import Http
+            _load_env(self.env)
+            txt = "Phone: " + str(m.get("text", m.get("status", "ok")))[:500]
+            await Http().post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN','')}/sendMessage", json={"chat_id": b, "text": txt})
+
+    async def webSocketClose(self, ws, code, reason, was_clean):
+        try:
+            ws.close(code, reason)
+        except Exception:
+            pass
+
     async def add_turn(self, user_text, reply_text):
         raw = await self.ctx.storage.get("hist")
         h = json.loads(raw) if raw else []
@@ -88,6 +140,9 @@ class DOState:
     async def history(self):
         return json.loads(await self.stub.history())
 
+    async def push_command(self, cmd):
+        return await self.stub.push_command(json.dumps(cmd))
+
     async def add_turn(self, u, m):
         await self.stub.add_turn(u, m)
 
@@ -114,7 +169,15 @@ class Default(WorkerEntrypoint):
         path = urlparse(request.url).path
         if path == "/health":
             return Response(json.dumps({"ok": True, "service": "maya-backend-edge"}), headers={"content-type": "application/json"})
-        app = App(http=Http(), state=DOState(self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya"))))
+        stub = self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya"))
+        app = App(http=Http(), state=DOState(stub))
+        if path == "/v1/phone/ws":
+            if str(request.headers.get("upgrade") or "").lower() != "websocket":
+                return Response("expected websocket", status=426)
+            u, _t, err = await app.user(_hdrs(request))
+            if err:
+                return Response(json.dumps(err[1]), status=err[0], headers={"content-type": "application/json"})
+            return await stub.fetch(request)
         body = await request.text() if request.method in ("POST", "PUT", "PATCH") else ""
         status, payload = await app.handle(request.method, path, _hdrs(request), body)
         if payload is None:
