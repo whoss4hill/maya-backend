@@ -49,3 +49,9 @@ def test_rate_limit_and_window():
 def test_text_cap_and_empty():
     on(); assert len(handle(H, upd(text="x" * 5000), State())[1]) == 2000
     assert handle(H, upd(text="   "), State())[0] == "ignored"
+
+
+def test_outbound_only_to_bound_owner():
+    from telegram_channel import outbound_chat_id
+    assert outbound_chat_id(42) == 42
+    assert outbound_chat_id(None) is None and outbound_chat_id(-100) is None and outbound_chat_id("42") is None
