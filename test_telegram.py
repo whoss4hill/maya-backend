@@ -55,3 +55,22 @@ def test_outbound_only_to_bound_owner():
     from telegram_channel import outbound_chat_id
     assert outbound_chat_id(42) == 42
     assert outbound_chat_id(None) is None and outbound_chat_id(-100) is None and outbound_chat_id("42") is None
+
+
+def test_off_consumes_updates_no_execution_after_reenable():
+    on(); s = State(); s.owner_enabled = False
+    assert handle(H, upd(uid=10, text="send it"), s) == ("off", None)
+    s.owner_enabled = True
+    assert handle(H, upd(uid=10, text="send it"), s)[0] == "replay"
+    assert handle(H, upd(uid=11, text="new"), s) == ("ok", "new")
+
+def test_off_still_checks_secret_and_keeps_binding_rules():
+    on(); s = State(); s.owner_enabled = False
+    assert handle({}, upd(uid=1), s)[0] == "bad_secret"
+    s.owner_enabled = True
+    assert handle(H, upd(uid=2, fid=7, cid=7), s)[0] == "ignored"
+
+def test_stale_message_dropped():
+    on(); s = State()
+    assert handle(H, upd(uid=1, date=1000), s, now=1000 + 301) == ("stale", None)
+    assert handle(H, upd(uid=2, date=1000), s, now=1000 + 100) == ("ok", "hi")
