@@ -49,6 +49,16 @@ class MayaState(DurableObject):
     async def bound(self):
         core = await self._core(); return core.bound_id
 
+    async def history(self):
+        raw = await self.ctx.storage.get("hist")
+        return raw if raw else "[]"
+
+    async def add_turn(self, user_text, reply_text):
+        raw = await self.ctx.storage.get("hist")
+        h = json.loads(raw) if raw else []
+        h.append(["user", str(user_text)[:1500]]); h.append(["model", str(reply_text)[:1500]])
+        await self.ctx.storage.put("hist", json.dumps(h[-12:]))
+
     async def status(self):
         core = await self._core(); b = core.bound_id
         return json.dumps({"bound": b is not None, "enabled": core.data["tg"]["owner_enabled"],
@@ -74,6 +84,12 @@ class DOState:
 
     async def status(self):
         return json.loads(await self.stub.status())
+
+    async def history(self):
+        return json.loads(await self.stub.history())
+
+    async def add_turn(self, u, m):
+        await self.stub.add_turn(u, m)
 
     async def bound(self):
         b = await self.stub.bound()
