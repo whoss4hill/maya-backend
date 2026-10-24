@@ -43,13 +43,16 @@ def voice_intent(text):
 
 _IMG_VERB = re.compile(r"(?i)\b(?:bana(?:o|do|ke|na)?|banaye|generate|create|make|draw|paint|design|dikha(?:o|do)? ?ek)\b")
 _IMG_NOUN = re.compile(r"(?i)\b(?:image|images|picture|pic|tasveer|tasvir|drawing|illustration|artwork)\b")
-_IMG_NOT = re.compile(r"(?i)\b(?:send|forward|share|find|search|open|delete|show me my|my (?:photos|pictures|images)|gallery|screenshot|photo of me|edit (?:this|my))\b")
+_IMG_NOT = re.compile(r"(?i)\b(?:send|forward|share|find|search|open|delete|show me my|my (?:photos|pictures|images)|gallery|screenshot|photo of me|edit (?:this|my)|frame|frames|size|resolution|format|file|wallpaper|translate|explain|meaning|summari[sz]e|rewrite|correct|quote|said|says|told|wrote|message|text|caption|prompt|how (?:do|to|can)|what|why|which)\b")
+_IMG_QUOTED = re.compile(r"[\"\u201c\u201d`]")
 
 
 def image_intent(text):
     """Conservative natural-language image request. Returns the drawing request text or None."""
     t = (text or "").strip()
     if not t or len(t) > 400 or t.startswith("/"):
+        return None
+    if _IMG_QUOTED.search(t) or t.endswith("?"):
         return None
     if _IMG_VERB.search(t) and _IMG_NOUN.search(t) and not _IMG_NOT.search(t):
         return t
