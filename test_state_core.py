@@ -51,3 +51,13 @@ def test_bad_secret_and_rebind_replaces_and_revoke():
 def test_group_chat_cannot_pair():
     now = time.time(); c = Core(); code = c.pair_start(now)
     assert c.telegram_update(H, upd(1, 9, f"/pair {code}", now, chat_type="group", cid=-5), now)[0] == "ignored" and c.bound_id is None
+
+
+def test_targeted_pairing_rejects_other_chat_and_accepts_target():
+    from telegram_pairing import Pairing
+    s = {}; p = Pairing(s)
+    code = p.start(now=1000, target_id=555)
+    assert p.claim(999, "private", "/pair " + code, now=1001) == "rejected" and p.bound_id is None
+    assert p.claim(555, "private", "/pair " + code, now=1002) == "paired" and p.bound_id == 555
+    c2 = p.start(now=2000)  # untargeted still works
+    assert p.claim(777, "private", "/pair " + c2, now=2001) == "paired"
