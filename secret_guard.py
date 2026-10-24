@@ -13,7 +13,7 @@ _PATTERNS = [
     re.compile(r"\b\d{8,10}:[A-Za-z0-9_\-]{35}\b"),                    # Telegram bot token
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}\b"),  # JWT
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-\.=]{20,}"),
-    re.compile(r"(?i)\b(?:password|passcode|passwd|pwd|pin|cvv|cvc|otp|api[ _-]?key|secret|token)\b\s*(?:is|=|:|hai|h)\s*[\"']?[^\s\"']{4,}"),
+    re.compile(r"(?i)\b(?:password|passcode|passwd|pwd|pin|cvv|cvc|otp|api[ _-]?key|secret|token)\b\s*(?:is|=|:|hai|h)\s*(?![<$\[{(%])[\"']?[^\s\"']{4,}"),
     re.compile(r"(?i)\b(?:cvv|cvc|pin)\b\s*(?:is|=|:|hai|h)?\s*\d{3,8}\b"),
     re.compile(r"(?i)\b(?:mera|my)\s+(?:password|pin|cvv)\b\s*[^\s]{0,3}\s*[\"']?[^\s\"']{4,}"),
 ]
