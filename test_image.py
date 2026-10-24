@@ -257,3 +257,21 @@ def test_voice_failure_is_recorded_metadata_only(app):
     fails = app.state.core.data.get("fails", [])
     assert fails and all(set(f) == {"ts", "stage", "status"} for f in fails), "metadata-only entries"
     assert any(f["stage"] == "voice_stt" for f in fails)
+
+
+def test_photo_variant_picked_strictly_below_512():
+    import telegram_channel as tc
+    from state_core import State
+    import os
+    os.environ.setdefault("MAYA_TELEGRAM_ENABLED", "1"); os.environ.setdefault("MAYA_TELEGRAM_SECRET", "s3")
+    upd = {"update_id": 5, "message": {"message_id": 9, "date": 2000000000,
+        "from": {"id": 42, "is_bot": False}, "chat": {"id": 42, "type": "private"},
+        "caption": "edit it",
+        "photo": [
+            {"file_id": "small90", "width": 90, "height": 90, "file_size": 1000},
+            {"file_id": "mid320", "width": 320, "height": 240, "file_size": 9000},
+            {"file_id": "big1280", "width": 1280, "height": 960, "file_size": 90000}]}}
+    st = State(); st.owner_enabled = True
+    status, payload = tc.handle({"X-Telegram-Bot-Api-Secret-Token": "s3"}, upd, st, now=2000000000.0, owner="42")
+    assert status == "photo"
+    assert json.loads(payload)["file_id"] == "mid320", "largest variant strictly below 512x512 must be chosen"

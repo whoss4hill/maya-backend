@@ -66,8 +66,13 @@ def handle(headers: dict, update: dict, state: State, now: float = None, owner: 
     is_text = isinstance(text, str) and bool(text.strip())
     va = msg.get("voice") or msg.get("audio") or {}
     file_id = va.get("file_id") if isinstance(va, dict) else None
-    photos = msg.get("photo") if isinstance(msg.get("photo"), list) else []
-    photo_id = (photos[-1] or {}).get("file_id") if photos and isinstance(photos[-1], dict) else None
+    photos = [p for p in (msg.get("photo") if isinstance(msg.get("photo"), list) else []) if isinstance(p, dict)]
+    # FLUX.2 klein edit contract: every input image must be STRICTLY smaller than 512x512
+    # (official changelog 2026-01-15). Telegram already sends several variants of one photo,
+    # so pick the largest variant inside the limit - no resizing needed, full privacy kept.
+    fit = [p for p in photos if int(p.get("width") or 0) < 512 and int(p.get("height") or 0) < 512 and p.get("file_id")]
+    pick = max(fit, key=lambda p: int(p.get("file_size") or p.get("width") or 0)) if fit else None
+    photo_id = pick.get("file_id") if pick else None
     if (chat.get("type") != "private" or str(frm.get("id")) != c["owner"] or str(chat.get("id")) != c["owner"]
             or frm.get("is_bot") or not (is_text or file_id or photo_id)
             or "forward_origin" in msg or "forward_date" in msg):
