@@ -156,7 +156,7 @@ class App:
         models = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
         try:
             if await self.state.model_pref_get() == "backup_only":
-                return await self._backup_text(prompt)
+                return await self._backup_text(prompt, chosen=True)
         except Exception:
             pass
         r = None
@@ -189,7 +189,7 @@ class App:
                 break
         return await self._backup_text(prompt)
 
-    async def _backup_text(self, prompt):
+    async def _backup_text(self, prompt, chosen=False):
         """Same-account Cloudflare Workers AI fallback (Free allocation only; the platform refuses past it)."""
         ai = getattr(self, "ai", None)
         if ai is None or not hasattr(ai, "text"):
@@ -198,7 +198,8 @@ class App:
         if not out:
             return None
         self.used_backup = True
-        return out.strip() + "\n\n(Backup AI model answered because the main one was unavailable.)"
+        note = "(Backup AI model answered, as selected in settings.)" if chosen else "(Backup AI model answered because the main one was unavailable.)"
+        return out.strip() + "\n\n" + note
 
     # ---- router
     async def handle(self, method, path, headers, body):
