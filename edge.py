@@ -18,6 +18,24 @@ _LIVE = re.compile(r"\b(train|passenger|express|memu|pnr|platform|running status
 _LIVE_ASK = re.compile(r"\b(dekho|dekh|check|batao|bata|status|time|timing|kab|kitne baje|search|find|dhundh|book)\b", re.I)
 
 
+_VN_WORD = re.compile(r"\b(vn|v\.n\.?|voice\s*note|voice\s*message|voice|audio)\b", re.I)
+_VN_ASK = re.compile(r"\b(send|bhej\w*|bana\w*|kro|karo|kar\s*do|sun\w*|bol\w*|record)\b", re.I)
+_VN_STRIP = re.compile(r"\b(ak|ek|ik)\s+(vn|voice\s*note|voice\s*message|voice|audio)\b|\b(vn|voice\s*note|voice\s*message|voice|audio)\b|\b(send|bhejo|bhej\s*do|bhej|bana\s*do|banao|bana|kro|karo|kar\s*do)\b|\b(jisme|jismein|jis\s*mein|ki)\b", re.I)
+_VN_TAIL = re.compile(r"\b(bolo|bol\s*do|bolna|bolke|bol\s*ke|keh\s*do|sunao)\s*[.!]*\s*$", re.I)
+
+
+def voice_intent(text):
+    """Natural Hinglish/English 'send a VN saying <words>' -> the exact words to speak, else None. The words are kept verbatim."""
+    t = (text or "").strip()
+    if t.startswith("/") or not (_VN_WORD.search(t) and _VN_ASK.search(t)):
+        return None
+    body = t.split("She replied")[0]
+    body = _VN_TAIL.sub("", body).strip()
+    spoken = re.sub(r"\s+", " ", _VN_STRIP.sub(" ", body)).strip(" ,.:;-")
+    spoken = _VN_TAIL.sub("", spoken).strip(" ,.:;-")
+    return spoken if len(spoken) >= 2 else None
+
+
 def _needs_live_lookup(text):
     t = text or ""
     return bool(_LIVE.search(t) and _LIVE_ASK.search(t))
@@ -69,6 +87,7 @@ class App:
                 "(match his language; use English or other content languages only when he asks for them, e.g. code or English text). "
                 "Never end with generic 'how can I help' lines. You know nothing about him beyond this chat. "
                 "Today's date is " + today + " (UTC). You have NO internet, browsing, search or other tools in this chat. "
+                "You CAN make audio: when he asks for a voice note or audio of some words, the app turns the exact words into an audio file sent to this chat; never say you cannot record or send voice (if you ever answer such a request in text, tell him to send '/voice <exact words>'). You CAN make PDFs with /pdf. "
                 "Never claim to have checked a website, searched, or verified anything live. For anything that may have changed "
                 "(latest versions, news, prices, dates), say plainly that you cannot check live and that your knowledge may be outdated; "
                 "give any answer only as 'from memory, may be outdated' and never invent links or release dates.")
@@ -331,6 +350,10 @@ class App:
             await self._action(chat_id, action)
 
     async def _tg_process(self, status, text, chat_id):
+        if status == "ok" and text and not text.lstrip().startswith("/"):
+            spoken = voice_intent(text)
+            if spoken:
+                text = "/voice " + spoken  # natural request -> the real voice tool (WAV audio file to the owner's own chat)
         if status == "ok" and text and not text.lower().startswith(("/image", "/video")):
             action = "upload_document" if text.lower().startswith("/pdf") and text[4:].strip() else ("record_voice" if text.lower().startswith("/voice") and text[6:].strip() else "typing")
             await self._action(chat_id, action)
