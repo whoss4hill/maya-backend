@@ -160,3 +160,11 @@ def test_call_command_offline_and_sent(app):
     assert not any("generateContent" in u for _, u, _ in app.http.calls)
     msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
     assert "Nothing was dialled" in msgs[-1]
+
+
+def test_mail_gh_commands_honest_and_guarded(app):
+    for txt in ["/mail", "/mail send to bob@x.com: hi", "/gh edit whoss4hill/maya-app main a.kt: x", "/gh read whoss4hill/maya-app dev a.kt"]:
+        run(app._tg_process("ok", txt, 42))
+    msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
+    assert "connected nahi" in msgs[-4] and "NOT sent" in msgs[-3] and "protected_branch" in msgs[-2] and "connected nahi" in msgs[-1]
+    assert not any("generateContent" in u or "gmail" in u or "api.github" in u for _, u, _ in app.http.calls)
