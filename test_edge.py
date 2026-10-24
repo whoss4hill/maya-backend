@@ -168,3 +168,23 @@ def test_mail_gh_commands_honest_and_guarded(app):
     msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
     assert "connected nahi" in msgs[-4] and "NOT sent" in msgs[-3] and "protected_branch" in msgs[-2] and "connected nahi" in msgs[-1]
     assert not any("generateContent" in u or "gmail" in u or "api.github" in u for _, u, _ in app.http.calls)
+
+
+def test_live_train_request_gets_clear_unsupported_reply_no_gemini(app):
+    run(app._tg_process("ok", "Mujhe aaj ara patna City jana h 1labhi se 10 baje ke bich passenger train dekho.", 42))
+    assert not any("generateContent" in u for _, u, _ in app.http.calls)
+    assert "live" in [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u][-1]
+    run(app._tg_process("ok", "python mein list kaise banate hain", 42))
+    assert any("generateContent" in u for _, u, _ in app.http.calls)
+
+def test_webhook_defers_processing_and_returns_fast(app):
+    H = {"X-Telegram-Bot-Api-Secret-Token": "s3"}
+    code = run(app.handle("POST", "/v1/telegram/pair/start", A, ""))[1]["code"]
+    def tg(i, text): return run(app.handle("POST", "/telegram/webhook", H, json.dumps({"update_id": i, "message": {"from": {"id": 42}, "chat": {"id": 42, "type": "private"}, "text": text, "date": int(time.time())}})))
+    tg(1, f"/pair {code}")
+    jobs = []
+    app.defer = lambda c: jobs.append(c)
+    n = len(app.http.calls); st = tg(2, "hello")
+    assert st[0] == 200 and len(app.http.calls) == n and len(jobs) == 1
+    run(jobs[0])
+    assert any("generateContent" in u for _, u, _ in app.http.calls)
