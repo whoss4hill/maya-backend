@@ -74,3 +74,38 @@ def test_stale_message_dropped():
     on(); s = State()
     assert handle(H, upd(uid=1, date=1000), s, now=1000 + 301) == ("stale", None)
     assert handle(H, upd(uid=2, date=1000), s, now=1000 + 100) == ("ok", "hi")
+
+def vupd(uid=1, fid=42, cid=42, file_id="VOICE1", ctype="private", kind="voice", **extra):
+    m = {"from": {"id": fid, "is_bot": False}, "chat": {"id": cid, "type": ctype},
+         kind: {"file_id": file_id, "mime_type": "audio/ogg", "duration": 3, "file_size": 12000}}
+    m.update(extra)
+    return {"update_id": uid, "message": m}
+
+def test_owner_voice_note_accepted_with_meta():
+    import json
+    on(); st, meta = handle(H, vupd(), State())
+    assert st == "voice"
+    d = json.loads(meta)
+    assert d["file_id"] == "VOICE1" and d["mime"] == "audio/ogg" and d["duration"] == 3 and d["size"] == 12000
+
+def test_owner_audio_file_accepted():
+    on(); st, meta = handle(H, vupd(kind="audio", file_id="AUD1"), State())
+    assert st == "voice" and '"AUD1"' in meta
+
+def test_voice_stranger_group_forward_ignored():
+    on()
+    assert handle(H, vupd(fid=7, cid=7), State())[0] == "ignored"
+    assert handle(H, vupd(ctype="group", cid=-100), State())[0] == "ignored"
+    assert handle(H, vupd(forward_origin={"type": "user"}), State())[0] == "ignored"
+
+def test_voice_replay_idempotent():
+    on(); s = State()
+    assert handle(H, vupd(uid=9), s)[0] == "voice"
+    assert handle(H, vupd(uid=9), s)[0] == "replay"  # same voice note delivered twice never processes twice
+
+def test_voice_rate_limited_like_text():
+    on(MAYA_TELEGRAM_RATE="2"); s = State()
+    assert handle(H, vupd(uid=1), s)[0] == "voice"
+    assert handle(H, upd(uid=2), s)[0] == "ok"
+    assert handle(H, vupd(uid=3), s)[0] == "rate_limited"
+    os.environ.pop("MAYA_TELEGRAM_RATE", None)

@@ -6,6 +6,7 @@ import re
 import asyncio, json, os, re, time
 
 from net import Http
+from state_core import WORKER_MODELS, OPENROUTER_MODELS, GROQ_MODELS
 import gmail_tools, github_tools, secret_guard
 from pdfgen import make_pdf, unsupported_chars, UnsupportedText
 
@@ -154,9 +155,19 @@ class App:
         """Free-tier quotas are per model and small (primary showed limit 20/day): on 429/404 try the next model.
         503/500 are retried once after a short wait. Still free tier only: no billing, no search."""
         models = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
+        fell_from = None
         try:
-            if await self.state.model_pref_get() == "backup_only":
+            pref = await self.state.model_pref_get()
+            if pref == "backup_only":
                 return await self._backup_text(prompt, chosen=True)
+            if pref in WORKER_MODELS:
+                return await self._backup_text(prompt, chosen=True, model=pref)
+            if pref in OPENROUTER_MODELS or pref in GROQ_MODELS:
+                out = await self._public_pool_text(prompt, pref)
+                if out:
+                    return out
+                # safe fallback direction only: public pool -> private-tolerant Gemini chain (never the reverse)
+                fell_from = (OPENROUTER_MODELS.get(pref) or GROQ_MODELS.get(pref) or "The selected model").split(" (")[0]
         except Exception:
             pass
         r = None
@@ -182,24 +193,74 @@ class App:
             if r.status_code == 200:
                 try:
                     parts = r.json()["candidates"][0]["content"]["parts"]
-                    return "".join(p.get("text", "") for p in parts).strip() or "..."
+                    text = "".join(p.get("text", "") for p in parts).strip() or "..."
                 except Exception:
-                    return "..."
+                    text = "..."
+                if fell_from:
+                    text += "\n\n(" + fell_from + " was unavailable, so Maya's default model answered.)"
+                return text
             if r.status_code not in (429, 404, 500, 503):
                 break
-        return await self._backup_text(prompt)
+        return await self._backup_text(prompt, fell_from=fell_from)
 
-    async def _backup_text(self, prompt, chosen=False):
+    async def _backup_text(self, prompt, chosen=False, model=None, fell_from=None):
         """Same-account Cloudflare Workers AI fallback (Free allocation only; the platform refuses past it)."""
         ai = getattr(self, "ai", None)
         if ai is None or not hasattr(ai, "text"):
             return None
-        out = await ai.text(str(prompt)[:6000])
+        out = await (ai.text(str(prompt)[:6000], model=model) if model else ai.text(str(prompt)[:6000]))
         if not out:
             return None
         self.used_backup = True
-        note = "(Backup AI model answered, as selected in settings.)" if chosen else "(Backup AI model answered because the main one was unavailable.)"
+        if chosen and model and model in WORKER_MODELS:
+            note = "(" + WORKER_MODELS[model] + " answered, as selected in settings.)"
+        elif fell_from:
+            note = "(" + fell_from + " and the default model were unavailable, so the backup model answered.)"
+        else:
+            note = "(Backup AI model answered, as selected in settings.)" if chosen else "(Backup AI model answered because the main one was unavailable.)"
         return out.strip() + "\n\n" + note
+
+    async def _gen_image(self, prompt):
+        """Returns (b64, engine_label, used_fallback). Tries the user's chosen engine,
+        then the fallback; labels always name the ACTUAL engine that produced the image."""
+        from state_core import DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL, IMAGE_ENGINE_NAMES
+        first = await self.ai.image(prompt, model=DEFAULT_IMAGE_MODEL)
+        if first:
+            return first, IMAGE_ENGINE_NAMES[DEFAULT_IMAGE_MODEL], False
+        second = await self.ai.image(prompt, model=FALLBACK_IMAGE_MODEL)
+        if second:
+            return second, IMAGE_ENGINE_NAMES[FALLBACK_IMAGE_MODEL], True
+        return None, None, False
+
+    async def _public_pool_text(self, prompt, pref):
+        """Public free pools (OpenRouter / Groq): public data only. Sends ONLY the current prompt - no history,
+        no memories, no screen content, no voice transcripts. Secret-looking prompts are refused before leaving.
+        Failure returns None so the caller falls back to the Gemini chain (safe direction only)."""
+        import os as _os
+        if pref in OPENROUTER_MODELS:
+            base, env, models, tag = "https://openrouter.ai/api/v1/chat/completions", "OPENROUTER_API_KEY", OPENROUTER_MODELS, "openrouter"
+        else:
+            base, env, models, tag = "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", GROQ_MODELS, "groq"
+        key = _os.environ.get(env, "")
+        if not key:
+            return None  # key not configured yet; silent absence, honest fallback
+        if secret_guard.looks_like_secret(str(prompt)):
+            return "I can't send that to the free public model pool - it looks private. Ask me without the private part, or switch the model back in settings."
+        model_id = pref.split("/", 1)[1]  # strip the routing prefix
+        try:
+            r = await self.http.post(base,
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+                json={"model": model_id, "messages": [{"role": "user", "content": str(prompt)[:6000]}], "max_tokens": 600})
+            print(tag, model_id, "status", r.status_code)  # status only - never the prompt
+            if r.status_code != 200:
+                return None
+            out = r.json()["choices"][0]["message"]["content"]
+        except Exception as ex:
+            print(tag, "error", type(ex).__name__)
+            return None
+        if not out:
+            return None
+        return out.strip() + "\n\n(" + models.get(pref, "Free public model") + " answered.)"
 
     # ---- router
     async def handle(self, method, path, headers, body):
@@ -275,10 +336,10 @@ class App:
             ai = getattr(self, "ai", None)
             if ai is None:
                 return self.err(501, "image_not_configured")
-            img = await ai.image(prompt)
+            img, engine, used_fb = await self._gen_image(prompt)
             if not img:
                 return self.err(502, "image_unavailable_or_daily_free_limit")
-            return 200, {"image_base64": img, "mime": "image/jpeg", "model": "flux-1-schnell"}
+            return 200, {"image_base64": img, "mime": "image/jpeg", "model": engine, "fallback": used_fb}
         if path == "/v1/memories" and method == "GET":
             r = await self.http.get(f"{rest}/memories", headers=sb, params={
                 "select": "id,kind,content,source,created_at,last_used_at", "user_id": f"eq.{uid}", "order": "created_at.desc"})
@@ -312,7 +373,9 @@ class App:
                 if v not in ("auto", "backup_only"):
                     return self.err(422, "invalid_model")
                 await self.state.model_pref_set(v)
-            return 200, {"model": await self.state.model_pref_get(), "options": ["auto", "backup_only"]}
+            return 200, {"model": await self.state.model_pref_get(),
+                         "options": ["auto", "backup_only"] + list(WORKER_MODELS) + list(OPENROUTER_MODELS) + list(GROQ_MODELS),
+                         "labels": {"auto": "Maya chooses (Gemini first, backup if busy)", "backup_only": "Backup model only", **WORKER_MODELS, **OPENROUTER_MODELS, **GROQ_MODELS}}
         if path == "/v1/telegram/status" and method == "GET":
             return 200, await self.state.status()
         if path == "/v1/telegram/pair/start" and method == "POST":
@@ -407,6 +470,115 @@ class App:
             await self._job("error")
             print("tg guarded error", type(ex).__name__)
 
+
+    VOICE_MAX_SECONDS = 120  # product bound: short voice notes only
+    VOICE_MAX_BYTES = 10 * 1024 * 1024  # well inside Gemini's inline-request limit and Telegram's 20 MB bot download cap
+    VOICE_MIMES = {"audio/ogg", "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/x-m4a"}
+
+    async def _stt(self, data, mime):
+        """Free-tier Gemini audio transcription -> transcript text. "" = no speech heard, None = provider error."""
+        import base64
+        b64 = base64.b64encode(data).decode()
+        models = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
+        for model in models:
+            r = await self.http.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key},
+                json={"contents": [{"parts": [
+                    {"inlineData": {"mimeType": mime, "data": b64}},
+                    {"text": "Transcribe this voice message exactly as spoken, in the original language. "
+                             "If there is no speech or it is unintelligible, reply exactly NO_SPEECH."}]}]})
+            print("stt", model, "status", r.status_code)
+            if r.status_code != 200:
+                continue
+            try:
+                txt = "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"]).strip()
+            except Exception as ex:
+                print("stt parse error", type(ex).__name__)
+                return None
+            if not txt or txt.upper().startswith("NO_SPEECH"):
+                return ""
+            return txt[:2000]
+        return None
+
+    async def _voice_note(self, chat_id, meta_json):
+        """Owner voice note -> Telegram file download -> Gemini STT -> normal chat reply. Never silently ignored:
+        every failure path sends the owner a clear ack."""
+        try:
+            meta = json.loads(meta_json or "{}")
+        except Exception:
+            meta = {}
+        fid = meta.get("file_id")
+        dur, size = int(meta.get("duration") or 0), int(meta.get("size") or 0)
+        mime = str(meta.get("mime") or "audio/ogg")
+        print("voice note secs", dur, "bytes", size, "mime", mime)  # metadata only - never the transcript or audio
+        if not fid:
+            return
+        if dur > self.VOICE_MAX_SECONDS or (size and size > self.VOICE_MAX_BYTES):
+            await self._tg_send(chat_id, "That voice note is too long for me (about 2 minutes max). Please send a shorter one or type it.")
+            return
+        if mime not in self.VOICE_MIMES:
+            await self._tg_send(chat_id, "I could not read that audio format. A normal voice note works best - or just type it.")
+            return
+        try:
+            r = await self.http.get(f"https://api.telegram.org/bot{self.tg_token}/getFile", params={"file_id": fid})
+            fp = (r.json().get("result") or {}).get("file_path") if r.status_code == 200 else None
+        except Exception as ex:
+            fp = None
+            print("voice getFile error", type(ex).__name__)
+        if not fp:
+            await self._tg_send(chat_id, "I could not download that voice note - please send it again or type it.")
+            return
+        try:
+            st, data = await self.http.get_bytes(f"https://api.telegram.org/file/bot{self.tg_token}/{fp}")
+            if st != 200:
+                data = b""
+        except Exception as ex:
+            data = b""
+            print("voice download error", type(ex).__name__)
+        if not data or len(data) > 20 * 1024 * 1024:  # Telegram bot download hard cap
+            await self._tg_send(chat_id, "I could not download that voice note - please send it again or type it.")
+            return
+        if mime in ("audio/wav", "audio/x-wav") and self._wav_is_silence(data):
+            await self._tg_send(chat_id, "I could not hear anything in that voice note - please try again or type it.")
+            return
+        try:
+            transcript = await self._stt(data, mime)
+        except Exception as ex:
+            transcript = None
+            print("stt error", type(ex).__name__)
+        if transcript is None:
+            await self._tg_send(chat_id, "I could not make out that voice note right now - please try again or type it.")
+            return
+        if not transcript:
+            await self._tg_send(chat_id, "I could not hear any words in that voice note - please try again or type it.")
+            return
+        # The transcript is untrusted recognition, not typed intent: plain chat answers are fine, but
+        # commands/actions (/image, /pdf, /voice, natural image or voice requests) need typed confirmation.
+        t = transcript.strip()
+        if t.startswith("/") or voice_intent(t) or image_intent(t):
+            await self._tg_send(chat_id, 'I heard: "' + t[:300] + '". If that is right, send it to me as a typed message and I will do it - I never act on commands from audio on my own.')
+            return
+        await self._tg_process("ok", transcript, chat_id)
+
+    @staticmethod
+    def _wav_is_silence(data):
+        """True only for (near-)digital-silence PCM WAV we can decode ourselves. Compressed formats
+        (OGG/Opus, mp3) return False - codec bitrate is not reliable speech detection."""
+        import io, struct, wave
+        try:
+            with wave.open(io.BytesIO(data), "rb") as w:
+                frames = w.readframes(w.getnframes())
+                sw = w.getsampwidth()
+            if sw != 2 or not frames:
+                return False
+            n = len(frames) // 2
+            vals = struct.unpack("<%dh" % n, frames[: n * 2])
+            rms = (sum(v * v for v in vals) / n) ** 0.5
+            return rms < 50  # 16-bit PCM: digital silence ~0, quiet room noise <50, real speech is far above
+        except Exception:
+            return False
+
     async def _action(self, chat_id, action):
         try:
             r = await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendChatAction", json={"chat_id": chat_id, "action": action})
@@ -420,6 +592,9 @@ class App:
             await self._action(chat_id, action)
 
     async def _tg_process(self, status, text, chat_id):
+        if status == "voice":
+            await self._voice_note(chat_id, text)
+            return
         if status == "ok" and text and not text.lstrip().startswith("/"):
             spoken = voice_intent(text)
             if spoken:
@@ -522,18 +697,19 @@ class App:
                     elif getattr(self, "ai", None) is None:
                         await self._tg_send(chat_id, "Image generation is not set up on this server.")
                     else:
-                        b64 = await self.ai.image(ip)
+                        b64, engine, used_fb = await self._gen_image(ip)
+                        caption = ip[:200] + ("\n(made with " + engine + " - the usual image engine was unavailable)" if used_fb else "")
                         if not b64:
                             await self._tg_send(chat_id, "I could not make the image right now. The free daily image allowance may be used up or the service is busy. Nothing was charged. Please try again later.")
                         else:
                             import base64
                             jpg = base64.b64decode(b64)
                             r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendPhoto",
-                                                          {"chat_id": chat_id, "caption": ip[:200]}, "maya-image.jpg", jpg, mime="image/jpeg", field="photo")
+                                                          {"chat_id": chat_id, "caption": caption}, "maya-image.jpg", jpg, mime="image/jpeg", field="photo")
                             print("tg_sendPhoto status", r.status_code)
                             if r.status_code >= 400:
                                 r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
-                                                              {"chat_id": chat_id, "caption": ip[:200]}, "maya-image.jpg", jpg, mime="image/jpeg")
+                                                              {"chat_id": chat_id, "caption": caption}, "maya-image.jpg", jpg, mime="image/jpeg")
                                 print("tg_sendDocument(jpg) status", r.status_code)
                                 if r.status_code >= 400:
                                     await self._tg_send(chat_id, "The image was made but could not be sent.")

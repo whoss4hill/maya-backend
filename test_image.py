@@ -3,14 +3,18 @@ import test_edge as T
 from test_edge import app  # noqa: F401
 
 class FakeAI:
+    """out may be a value (returned for every model) or a dict model->value."""
     def __init__(self, out): self.out, self.calls = out, []
-    async def image(self, p): self.calls.append(p); return self.out
+    async def image(self, p, model=None):
+        self.calls.append((p, model))
+        return self.out.get(model) if isinstance(self.out, dict) else self.out
 
 def post(app, body): return T.run(app.handle("POST", "/v1/image", T.A, json.dumps(body)))
 
 def test_image_ok(app):
     app.ai = FakeAI("QUJD"); s, b = post(app, {"prompt": "a red kite over a hill"})
     assert s == 200 and b["image_base64"] == "QUJD" and b["mime"] == "image/jpeg"
+    assert b["model"] == "FLUX.2 Klein 4B" and b["fallback"] is False
 
 def test_image_not_configured(app):
     s, b = post(app, {"prompt": "a kite"}); assert s == 501
@@ -176,3 +180,24 @@ def test_optin_header_ordinary_chat_unchanged(app):
     h = dict(T.A); h["x-maya-media"] = "1"
     s, b = T.run(app.handle("POST", "/v1/chat", h, json.dumps({"message": "kal ka plan batao"})))
     assert s == 200 and "image_prompt" not in b
+
+
+def test_image_fallback_labels_actual_engine(app):
+    from state_core import DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL
+    app.ai = FakeAI({DEFAULT_IMAGE_MODEL: None, FALLBACK_IMAGE_MODEL: "RkFMTEJBQ0s="})
+    s, b = post(app, {"prompt": "a kite"})
+    assert s == 200 and b["model"] == "FLUX.1 Schnell" and b["fallback"] is True
+    assert [m for _, m in app.ai.calls] == [DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL]
+
+def test_tg_image_fallback_caption_names_actual_engine(app):
+    from state_core import DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL
+    app.ai = FakeAI({DEFAULT_IMAGE_MODEL: None, FALLBACK_IMAGE_MODEL: base64.b64encode(b"jpg").decode()})
+    T.run(app._tg_process("ok", "/image a red kite", 42))
+    caps = [(k.get("fields") or {}).get("caption", "") for u, k in files(app)]
+    assert any("made with FLUX.1 Schnell" in c for c in caps)
+
+def test_tg_image_primary_has_plain_caption(app):
+    app.ai = FakeAI(base64.b64encode(b"jpg").decode())
+    T.run(app._tg_process("ok", "/image a red kite", 42))
+    caps = [(k.get("fields") or {}).get("caption", "") for u, k in files(app)]
+    assert caps and all("made with" not in c for c in caps)

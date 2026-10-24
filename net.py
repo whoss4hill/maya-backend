@@ -70,6 +70,22 @@ class Http:
         r = await self._client.post(url, data={k: str(v) for k, v in fields.items()}, files={field: (filename, data, mime)})
         return Resp(r.status_code, r.text)
 
+    async def get_bytes(self, url, timeout=None):
+        """Raw binary GET (e.g. a Telegram file download). Returns (status, bytes)."""
+        if ON_WORKERS:
+            import asyncio as _aio
+
+            async def _go():
+                r = await _js_fetch(url)
+                buf = await r.arrayBuffer()
+                return int(r.status), bytes(_Uint8Array.new(buf).to_py())
+            return await _aio.wait_for(_go(), timeout or self.timeout)
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        r = await self._client.get(url)
+        return r.status_code, r.content
+
     async def get(self, url, **kw):
         return await self._request("GET", url, **kw)
 

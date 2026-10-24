@@ -204,6 +204,64 @@ def _hdrs(request):
     return h
 
 
+
+class _AI:
+    """Cloudflare Workers AI binding (Free plan: 10,000 Neurons/day, then the platform refuses; no paid plan here)."""
+    def __init__(self, env):
+        self.env = env
+
+    async def image(self, prompt, model=None):
+        # flux-1-schnell stays the default. FLUX.2 models (e.g. flux-2-klein-4b,
+        # runtime-verified 2026-10-24) require multipart input: the binding takes
+        # multipart={body, contentType} from a serialized FormData, NOT plain fields.
+        try:
+            from pyodide.ffi import to_js
+            from js import Object
+            from state_core import DEFAULT_IMAGE_MODEL
+            m = model or DEFAULT_IMAGE_MODEL
+            if m.startswith("@cf/black-forest-labs/flux-2"):
+                from js import FormData, Response as _JsResponse
+                form = FormData.new()
+                form.append("prompt", prompt)
+                form.append("width", "1024")
+                form.append("height", "1024")
+                fr = _JsResponse.new(form)
+                payload = to_js({"multipart": {"body": fr.body,
+                                               "contentType": fr.headers.get("content-type")}},
+                                dict_converter=Object.fromEntries)
+                r = await self.env.AI.run(m, payload)
+            else:
+                r = await self.env.AI.run(m, to_js({"prompt": prompt, "steps": 4},
+                                                   dict_converter=Object.fromEntries))
+            img = getattr(r, "image", None)
+            return str(img) if img else None
+        except Exception as ex:
+            print("ai image error", type(ex).__name__)
+            return None
+
+    async def text(self, prompt, model=None):
+        try:
+            from pyodide.ffi import to_js
+            from js import Object
+            from state_core import DEFAULT_WORKER_MODEL
+            r = await self.env.AI.run(model or DEFAULT_WORKER_MODEL, to_js({
+                "messages": [{"role": "system", "content": "You are Maya, a concise personal assistant. You are female: use feminine Hindi verb forms for yourself (karti hoon, sakti hoon). Reply in simple Hinglish unless asked otherwise. Never claim to have done real-world actions or looked things up live."},
+                             {"role": "user", "content": prompt}], "max_tokens": 600}, dict_converter=Object.fromEntries))
+            out = getattr(r, "response", None)
+            if out is None:
+                # reasoning/chat models (gpt-oss, qwen3.8, gemma-4) return an
+                # OpenAI chat-completion shape instead of {"response": ...}
+                ch = getattr(r, "choices", None)
+                if ch:
+                    msg = getattr(ch[0], "message", None)
+                    out = getattr(msg, "content", None) if msg is not None else None
+            out = str(out).strip() if out else None
+            return out or None
+        except Exception as ex:
+            print("ai text error", type(ex).__name__)
+            return None
+
+
 class Default(WorkerEntrypoint):
     async def fetch(self, request):
         _load_env(self.env)
@@ -215,6 +273,7 @@ class Default(WorkerEntrypoint):
             return Response(json.dumps({"ok": True, "service": "maya-backend-edge"}), headers={"content-type": "application/json"})
         stub = self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya"))
         app = App(http=Http(), state=DOState(stub))
+        app.ai = _AI(self.env)
         import asyncio as _a
         app.defer = lambda coro: self.ctx.waitUntil(_a.ensure_future(coro))
         if path == "/v1/phone/ws":

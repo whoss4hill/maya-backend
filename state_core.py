@@ -9,6 +9,50 @@ from telegram_channel import State, handle
 from telegram_pairing import Pairing
 
 
+# Free-eligible Cloudflare Workers AI text models selectable as Maya's answering model (2026-10-24 pricing page).
+# Eligibility is re-verified live after deploy; if a model starts erroring, its replies fall back honestly.
+# Workers AI IDs RUNTIME-VERIFIED 2026-10-24 via a scoped local binding probe
+# (wrangler dev --remote, real AI binding, no public endpoint, tiny inferences
+# well inside the 10k neurons/day free allocation) on the staging account:
+# every ID below returned content. gemma-3-12b-it was REMOVED (error 5018:
+# account not allowed). gpt-oss/qwen3.8/gemma-4 answer via chat-completion
+# shape; worker/src/entry.py extracts both response shapes.
+WORKER_MODELS = {
+    "@cf/meta/llama-3.1-8b-instruct-fp8-fast": "Llama 3.1 8B",
+    "@cf/qwen/qwen3-30b-a3b-fp8": "Qwen3 30B",
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast": "Llama 3.3 70B",
+    "@cf/openai/gpt-oss-120b": "GPT-OSS 120B",
+    "@cf/qwen/qwen3.8-27b": "Qwen 3.8 27B",
+    "@cf/google/gemma-4-26b-a4b-it": "Gemma 4 26B",
+}
+DEFAULT_WORKER_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8-fast"
+
+# Image engines (both runtime-verified on the live whos-s4hill account binding 2026-10-24).
+# DEFAULT = Sahil's explicit choice 2026-10-24 ("Ye best h" on the klein-4b sample vs schnell).
+# FALLBACK keeps the prior engine; when the fallback fires, the reply/API must name
+# the ACTUAL engine used - never label fallback output as the default engine's.
+DEFAULT_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
+FALLBACK_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+IMAGE_ENGINE_NAMES = {
+    DEFAULT_IMAGE_MODEL: "FLUX.2 Klein 4B",
+    FALLBACK_IMAGE_MODEL: "FLUX.1 Schnell",
+}
+
+# OpenRouter free-pool models (every ID revalidated against live catalog https://openrouter.ai/api/v1/models 2026-10-24 (pricing 0/0) AND adapter-tested live; inkling:free removed (403: agentic-harness-gated, unreachable via plain API)).
+# PUBLIC POOL: inputs pass to third-party model providers who may train on them (openrouter.ai/privacy).
+# These are NEVER in the auto chain, receive only the current prompt (no history/memory/screen/voice),
+# and secret-looking prompts are refused before sending. The settings UI must show the non-private warning.
+OPENROUTER_MODELS = {
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": "Nemotron 3 Ultra (free pool - NON-PRIVATE questions only)",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free": "Nemotron 3.5 Super VL (free pool - NON-PRIVATE questions only)",
+}
+
+GROQ_MODELS = {
+    "groq/openai/gpt-oss-120b": "GPT-OSS 120B via Groq (free pool - NON-PRIVATE questions only)",
+    "groq/openai/gpt-oss-20b": "GPT-OSS 20B via Groq (free pool - NON-PRIVATE questions only)",
+    "groq/qwen/qwen3.8-27b": "Qwen 3.8 27B via Groq (free pool - NON-PRIVATE questions only)",
+}
+
 class Core:
     def __init__(self, data: dict = None):
         self.data = data if data is not None else {}
@@ -43,10 +87,10 @@ class Core:
     @property
     def model_pref(self):
         v = self.data.get("model_pref", "auto")
-        return v if v in self.MODEL_PREFS else "auto"
+        return v if v in self.MODEL_PREFS or v in WORKER_MODELS or v in OPENROUTER_MODELS or v in GROQ_MODELS else "auto"
 
     def set_model_pref(self, v):
-        if v not in self.MODEL_PREFS:
+        if v not in self.MODEL_PREFS and v not in WORKER_MODELS and v not in OPENROUTER_MODELS and v not in GROQ_MODELS:
             raise ValueError("bad_model_pref")
         self.data["model_pref"] = v
 
@@ -75,7 +119,7 @@ class Core:
             return status, None, (self.bound_id if status == "paired" else None)
         status, text = handle(headers, update, st, now=now, owner=str(bound))
         self._save_state(st)
-        return status, text, (bound if status == "ok" else None)
+        return status, text, (bound if status in ("ok", "voice") else None)
 
     def _unbound(self, headers, update, st, now):
         """Nothing is paired: the only thing that can happen is a valid `/pair CODE` from a private chat."""
