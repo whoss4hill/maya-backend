@@ -111,7 +111,7 @@ class App:
                 "(match his language; use English or other content languages only when he asks for them, e.g. code or English text). "
                 "Never end with generic 'how can I help' lines. You know nothing about him beyond this chat. "
                 "Today's date is " + today + " (UTC). You have NO internet, browsing, search or other tools in this chat. "
-                "You CAN make audio: when he asks for a voice note or audio of some words, the app turns the exact words into an audio file sent to this chat; never say you cannot record or send voice (if you ever answer such a request in text, tell him to send '/voice <exact words>'). You CAN make PDFs with /pdf. "
+                "You CAN make audio: when he asks for a voice note or audio of some words, the app turns the exact words into an audio file sent to this chat; never say you cannot record or send voice (to speak exact words: '/voice <exact words>'; for an ongoing voice conversation where every answer is also spoken: '/voice on', stop with '/voice off'). You CAN make PDFs with /pdf. "
                 "Never claim to have checked a website, searched, or verified anything live. For anything that may have changed "
                 "(latest versions, news, prices, dates), say plainly that you cannot check live and that your knowledge may be outdated; "
                 "give any answer only as 'from memory, may be outdated' and never invent links or release dates.")
@@ -628,6 +628,33 @@ class App:
         except Exception:
             return False
 
+    async def _send_tts_out(self, chat_id, out):
+        """Send a (data, ext, mime) TTS result to the owner: real voice note for OGG/Opus, audio file (with document fallback) for WAV."""
+        data, ext, mime = out
+        if ext == "ogg":
+            r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendVoice",
+                                          {"chat_id": chat_id}, "maya-voice.ogg", data, mime=mime, field="voice")
+            print("tg_sendVoice status", r.status_code)
+            return r.status_code < 400
+        r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendAudio",
+                                      {"chat_id": chat_id, "title": "Maya voice"}, "maya-voice." + ext, data, mime=mime, field="audio")
+        print("tg_sendAudio status", r.status_code)
+        if r.status_code >= 400:
+            r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                          {"chat_id": chat_id}, "maya-voice." + ext, data, mime=mime)
+            print("tg_sendDocument status", r.status_code)
+        return r.status_code < 400
+
+    async def _voice_mode_on(self):
+        fn = getattr(self.state, "voice_mode_get", None)
+        if fn is None:
+            return False
+        try:
+            return bool(await fn())
+        except Exception as ex:
+            print("voice_mode read error", type(ex).__name__)
+            return False
+
     async def _action(self, chat_id, action):
         try:
             r = await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendChatAction", json={"chat_id": chat_id, "action": action})
@@ -721,32 +748,28 @@ class App:
                         await self._tg_send(chat_id, "Phone app is not connected right now. Nothing was dialled and nothing is queued.")
                 elif low.startswith("/voice"):
                     vt = text[6:].strip()
-                    if not vt:
-                        await self._tg_send(chat_id, "Usage: /voice <text to speak>")
+                    ctl = vt.lower()
+                    if not vt or ctl in ("on", "off", "status"):
+                        # Voice conversation mode: every normal answer is ALSO spoken in Maya's voice (text still sent).
+                        set_fn = getattr(self.state, "voice_mode_set", None)
+                        if ctl == "status" or set_fn is None:
+                            on = await self._voice_mode_on()
+                            await self._tg_send(chat_id, "Voice mode " + ("ON hai. Har jawab awaaz me bhi jata hai." if on else "OFF hai.") + " Chalu: /voice on, band: /voice off, ya kisi exact text ko bolwane ke liye /voice <text>.")
+                        else:
+                            on = ctl != "off"
+                            await set_fn(on)
+                            if on:
+                                await self._tg_send(chat_id, "Voice mode ON. Ab jo bhi bhejoge - text ya voice note - main samajhkar jawab dungi aur woh jawab awaaz me bhi sunai dega (text ke saath). Band karne ke liye /voice off.")
+                            else:
+                                await self._tg_send(chat_id, "Voice mode OFF. Ab jawab sirf text me jayenge.")
                     elif len(vt) > 1500:
                         await self._tg_send(chat_id, "Text is too long for one voice clip (max 1500 characters).")
                     else:
                         out = await self._tts(vt)
                         if not out:
                             await self._tg_send(chat_id, "Could not generate the audio right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + ").")
-                        else:
-                            data, ext, mime = out
-                            if ext == "ogg":  # ElevenLabs Opus: a real Telegram voice note
-                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendVoice",
-                                                              {"chat_id": chat_id}, "maya-voice.ogg", data, mime=mime, field="voice")
-                                print("tg_sendVoice status", r.status_code)
-                                if r.status_code >= 400:
-                                    await self._tg_send(chat_id, "Audio could not be sent.")
-                            else:
-                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendAudio",
-                                                              {"chat_id": chat_id, "title": "Maya voice"}, "maya-voice." + ext, data, mime=mime, field="audio")
-                                print("tg_sendAudio status", r.status_code)
-                                if r.status_code >= 400:
-                                    r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
-                                                                  {"chat_id": chat_id}, "maya-voice." + ext, data, mime=mime)
-                                    print("tg_sendDocument status", r.status_code)
-                                    if r.status_code >= 400:
-                                        await self._tg_send(chat_id, "Audio could not be sent.")
+                        elif not await self._send_tts_out(chat_id, out):
+                            await self._tg_send(chat_id, "Audio could not be sent.")
                 elif low.startswith("/image") or (image_intent(text) is not None and getattr(self, "ai", None) is not None):
                     ip = text[6:].strip() if low.startswith("/image") else image_intent(text)
                     if not ip or len(ip) > 400:
@@ -794,6 +817,11 @@ class App:
                         print("tg sendMessage status", r.status_code, "chunks", len(self.chunks(reply)))
                         if r.status_code >= 400:
                             await self._tg_send(chat_id, "Reply could not be delivered in full. Please try again.")
+                        elif await self._voice_mode_on():
+                            out = await self._tts(reply[:1500])
+                            print("voice_mode tts ok", out is not None)
+                            if out is not None:
+                                await self._send_tts_out(chat_id, out)
                     else:
                         await self._tg_send(chat_id, "Maya could not get an answer from the AI right now (error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again.")
         except Exception as ex:

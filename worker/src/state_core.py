@@ -113,6 +113,15 @@ class Core:
         self.data["tg"]["owner_enabled"] = bool(on)
         self._audit({"event": "toggle", "on": bool(on)})
 
+    # -- Telegram voice conversation mode: when on, every normal chat answer is ALSO spoken (TTS audio).
+    @property
+    def voice_mode(self):
+        return bool(self.data.get("voice_mode"))
+
+    def set_voice_mode(self, on: bool):
+        self.data["voice_mode"] = bool(on)
+        self._audit({"event": "voice_mode", "on": bool(on)})
+
     def pair_start(self, now=None, target_id=None):
         return self._pairing().start(now, target_id)
 

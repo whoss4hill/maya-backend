@@ -11,6 +11,8 @@ class St:
     async def update(self, h, u): return self.core.telegram_update(h, u)
     async def pair_start(self, target_id=None): return self.core.pair_start(target_id=target_id)
     async def set_enabled(self, on): self.core.set_enabled(on)
+    async def voice_mode_get(self): return self.core.voice_mode
+    async def voice_mode_set(self, on): self.core.set_voice_mode(on)
     async def revoke(self): self.core.revoke()
     async def model_pref_get(self): return self.core.model_pref
     async def model_pref_set(self, v): self.core.set_model_pref(v)
@@ -193,6 +195,81 @@ def test_elevenlabs_failure_falls_back_to_gemini(app, monkeypatch):
         return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16; rate=24000; channels=1", "data": base64.b64encode(pcm).decode()}}]}}]}))
     app.http.post = post
     w, ext, _ = run(app._tts("hello")); assert ext == "wav" and w[:4] == b"RIFF"
+
+
+def _fake_tts_wav(app):
+    import base64
+    pcm = b"\x00\x01" * 100
+    async def post(u, **k):
+        app.http.calls.append(("POST", u, k))
+        if "3.8-flash-tts" in u: return Resp(429, "{}")
+        if "generateContent" in u and "speechConfig" in json.dumps(k.get("json", {})):
+            return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16; rate=24000; channels=1", "data": base64.b64encode(pcm).decode()}}]}}]}))
+        return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
+    app.http.post = post
+    return pcm
+
+
+def test_voice_mode_commands(app):
+    run(app._tg_process("ok", "/voice", 42))
+    assert app.state.core.voice_mode is True
+    msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
+    assert any("Voice mode ON" in t for t in msgs)
+    run(app._tg_process("ok", "/voice status", 42))
+    msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
+    assert any("Voice mode ON hai" in t for t in msgs)
+    run(app._tg_process("ok", "/voice off", 42))
+    assert app.state.core.voice_mode is False
+    msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
+    assert any("Voice mode OFF" in t for t in msgs)
+
+
+def test_voice_mode_speaks_answers(app):
+    pcm = _fake_tts_wav(app)
+    run(app._tg_process("ok", "/voice on", 42))
+    n0 = len(app.http.calls)
+    run(app._tg_process("ok", "hi", 42))
+    new = app.http.calls[n0:]
+    assert any("sendMessage" in u and k["json"]["text"] == "pong" for m, u, k in new)  # text answer still sent
+    f = [k for m, u, k in new if m == "FILE" and "sendAudio" in u]
+    assert f and f[0]["data"][:4] == b"RIFF" and pcm in f[0]["data"]  # the ANSWER is spoken, not the input "hi"
+    tts = [k["json"] for m, u, k in new if "generateContent" in u and "speechConfig" in json.dumps(k.get("json", {}))]
+    assert tts and tts[0]["contents"][0]["parts"][0]["text"] == "pong"
+
+
+def test_voice_mode_off_no_audio(app):
+    _fake_tts_wav(app)
+    run(app._tg_process("ok", "hi", 42))
+    assert not [k for m, u, k in app.http.calls if m == "FILE"]
+    assert any("sendMessage" in u for m, u, k in app.http.calls)
+
+
+def test_voice_note_answer_spoken_in_mode(app):
+    pcm = _fake_tts_wav(app)
+    app.core_bound = True
+    async def get_bytes(u, timeout=None):
+        return 200, b"OggS fake audio"
+    app.http.get_bytes = get_bytes
+    async def post(u, **k):
+        app.http.calls.append(("POST", u, k))
+        body = json.dumps(k.get("json", {}))
+        if "getFile" in u: return Resp(200, json.dumps({"result": {"file_path": "voice/file_1.oga"}}))
+        if "Transcribe this voice message" in body:
+            return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "aaj mausam kaisa hai"}]}}]}))
+        if "speechConfig" in body:
+            import base64
+            return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16; rate=24000; channels=1", "data": base64.b64encode(pcm).decode()}}]}}]}))
+        if "generateContent" in u: return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
+        return Resp(200, "{}")
+    app.http.post = post
+    async def get(u, **k):
+        if "getFile" in u: return Resp(200, json.dumps({"result": {"file_path": "voice/file_1.oga"}}))
+        return Resp(200, "[]")
+    app.http.get = get
+    run(app._tg_process("ok", "/voice on", 42))
+    run(app._tg_process("voice", json.dumps({"file_id": "f1", "duration": 3, "size": 1000, "mime": "audio/ogg"}), 42))
+    f = [k for m, u, k in app.http.calls if m == "FILE" and "sendAudio" in u]
+    assert f and f[0]["data"][:4] == b"RIFF"  # understood via STT, answer spoken in mode
 
 
 def test_chat_history_passed_and_no_intro_rule(app):

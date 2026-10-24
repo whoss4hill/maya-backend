@@ -53,6 +53,12 @@ class MayaState(DurableObject):
     async def set_enabled(self, on):
         core = await self._core(); core.set_enabled(bool(on)); await self._save(core)
 
+    async def voice_mode_get(self):
+        core = await self._core(); return json.dumps(core.voice_mode)
+
+    async def voice_mode_set(self, on):
+        core = await self._core(); core.set_voice_mode(bool(on)); await self._save(core)
+
     async def model_pref_get(self):
         core = await self._core(); return core.model_pref
 
@@ -172,6 +178,12 @@ class DOState:
 
     async def set_enabled(self, on):
         await self.stub.set_enabled(on)
+
+    async def voice_mode_get(self):
+        return json.loads(await self.stub.voice_mode_get())
+
+    async def voice_mode_set(self, on):
+        await self.stub.voice_mode_set(on)
 
     async def model_pref_get(self):
         return await self.stub.model_pref_get()
