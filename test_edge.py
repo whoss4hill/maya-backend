@@ -219,7 +219,10 @@ def test_voice_intent_exact_words_and_dispatch(app):
     from edge import voice_intent
     assert voice_intent("Ak vn send kro jisme hello golu mere jaan kaise ho kya kr rahe ho bolo") == "hello golu mere jaan kaise ho kya kr rahe ho"
     assert voice_intent("voice note bhejo: good morning") == "good morning"
-    assert voice_intent("ek audio bana do jisme tum bolo happy birthday") == "tum bolo happy birthday" or "happy birthday" in voice_intent("ek audio bana do jisme tum bolo happy birthday")
+    assert voice_intent("ek audio bana do jisme tum bolo happy birthday") == "tum bolo happy birthday"
+    assert voice_intent("vn bhejo jisme hello golu ki jaan kaise ho bolo") == "hello golu ki jaan kaise ho"
+    assert voice_intent("voice note bhejo good morning send kro") == "good morning send kro"
+    assert voice_intent("vn send kro") is None
     assert voice_intent("voice assistant kya hota hai") is None
     assert voice_intent("/voice hi") is None and voice_intent("hello") is None
 
