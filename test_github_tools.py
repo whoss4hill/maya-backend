@@ -15,3 +15,17 @@ def test_plan_and_url():
     assert "NOT pushed" in plan_preview(c)
     assert contents_url("whoss4hill/maya-backend", "cloudflare-port", "edge.py").endswith("edge.py?ref=cloudflare-port")
     with pytest.raises(ValueError): contents_url("x/y", "b", "p")
+
+
+def test_read_write_helpers():
+    import base64
+    from github_tools import parse_read, write_body, api_headers, confirm_matches
+    assert parse_read({"type": "file", "size": 5, "content": base64.b64encode(b"hello").decode()}) == "hello"
+    assert parse_read({"type": "dir"}) == "Not a single file."
+    assert parse_read({"type": "file", "size": 999999, "content": ""}) == "File too large to show."
+    b = write_body("whoss4hill/maya-backend", "cloudflare-port", "edge.py", "x", "m", "abc")
+    assert b["branch"] == "cloudflare-port" and b["sha"] == "abc" and base64.b64decode(b["content"]) == b"x"
+    with pytest.raises(ValueError): write_body("whoss4hill/maya-backend", "main", "edge.py", "x", "m")
+    with pytest.raises(ValueError): write_body("other/repo", "dev", "edge.py", "x", "m")
+    assert api_headers("T")["Authorization"] == "Bearer T"
+    assert confirm_matches({"used": False}, " Yes Push ") and not confirm_matches({"used": True}, "yes push") and not confirm_matches({}, "yes push")
