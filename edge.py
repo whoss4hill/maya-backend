@@ -225,6 +225,19 @@ class App:
             if ins.status_code >= 400:
                 return self.err(500, "internal_error")
             return 200, {"reply": reply}
+        if path == "/v1/image" and method == "POST":
+            prompt = str(data.get("prompt") or "").strip()
+            if not prompt or len(prompt) > 400:
+                return self.err(400, "prompt_required_max_400_chars")
+            if secret_guard.looks_like_secret(prompt):
+                return self.err(422, "secret_detected")
+            ai = getattr(self, "ai", None)
+            if ai is None:
+                return self.err(501, "image_not_configured")
+            img = await ai.image(prompt)
+            if not img:
+                return self.err(502, "image_unavailable_or_daily_free_limit")
+            return 200, {"image_base64": img, "mime": "image/jpeg", "model": "flux-1-schnell"}
         if path == "/v1/memories" and method == "GET":
             r = await self.http.get(f"{rest}/memories", headers=sb, params={
                 "select": "id,kind,content,source,created_at,last_used_at", "user_id": f"eq.{uid}", "order": "created_at.desc"})
