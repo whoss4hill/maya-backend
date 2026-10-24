@@ -8,7 +8,7 @@ ENV = dict(SUPABASE_URL="https://x.supabase.co", SUPABASE_ANON_KEY="anon", GEMIN
 class St:
     def __init__(self): self.core = Core()
     async def update(self, h, u): return self.core.telegram_update(h, u)
-    async def pair_start(self): return self.core.pair_start()
+    async def pair_start(self, target_id=None): return self.core.pair_start(target_id=target_id)
     async def set_enabled(self, on): self.core.set_enabled(on)
     async def revoke(self): self.core.revoke()
     async def bound(self): return self.core.bound_id
