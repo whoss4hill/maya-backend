@@ -154,6 +154,11 @@ class App:
         """Free-tier quotas are per model and small (primary showed limit 20/day): on 429/404 try the next model.
         503/500 are retried once after a short wait. Still free tier only: no billing, no search."""
         models = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
+        try:
+            if await self.state.model_pref_get() == "backup_only":
+                return await self._backup_text(prompt)
+        except Exception:
+            pass
         r = None
         for model in models:
             for attempt in range(2):
@@ -296,6 +301,13 @@ class App:
             r = await self.http.post(f"{rest}/tasks", headers={**sb, "Content-Type": "application/json", "Prefer": "return=representation"},
                                      params={"select": "id"}, json={"user_id": uid, "title": data["title"], "due": data.get("due") or None, "notes": data.get("notes") or None})
             return (201, {"id": r.json()[0]["id"]}) if r.status_code < 400 else self.err(500, "internal_error")
+        if path == "/v1/settings/model" and method in ("GET", "POST"):
+            if method == "POST":
+                v = data.get("model") if isinstance(data, dict) else None
+                if v not in ("auto", "backup_only"):
+                    return self.err(422, "invalid_model")
+                await self.state.model_pref_set(v)
+            return 200, {"model": await self.state.model_pref_get(), "options": ["auto", "backup_only"]}
         if path == "/v1/telegram/status" and method == "GET":
             return 200, await self.state.status()
         if path == "/v1/telegram/pair/start" and method == "POST":
