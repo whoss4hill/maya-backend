@@ -8,6 +8,7 @@ A = {"Authorization": "Bearer jwt"}
 @pytest.fixture
 def app(monkeypatch):
     for k, v in ENV.items(): monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("MAYA_RL_READ_PER_MIN", "2")
     monkeypatch.setenv("MAYA_RL_CHAT_PER_MIN", "1")
     import importlib, edge; importlib.reload(edge)
@@ -67,6 +68,7 @@ def test_invalid_env_falls_back(app, monkeypatch):
 
 def test_counter_error_503(monkeypatch):
     for k, v in ENV.items(): monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     import importlib, edge; importlib.reload(edge)
     class Boom(St):
         async def rl_hit(self, bucket, limit): raise RuntimeError("do down")
