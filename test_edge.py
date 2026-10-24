@@ -14,6 +14,7 @@ class St:
     async def revoke(self): self.core.revoke()
     async def model_pref_get(self): return self.core.model_pref
     async def model_pref_set(self, v): self.core.set_model_pref(v)
+    async def rl_hit(self, bucket, limit): return self.core.rl_hit(bucket, limit)
     async def bound(self): return self.core.bound_id
     job = {}
     async def job_set(self, s, n="", alarm_s=0): self.job = {"state": s, "note": n, "ts": time.time()}

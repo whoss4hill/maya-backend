@@ -81,6 +81,21 @@ class Core:
     def bound_id(self):
         return self.data["pair"].get("bound_id")
 
+    # -- Maya per-minute burst limit (Maya's own, NOT a provider quota). One counter per bucket per UTC minute.
+    def rl_hit(self, bucket, limit, now=None):
+        """Increment and check bucket for the current minute. Returns (allowed, retry_after_seconds)."""
+        now = time.time() if now is None else now
+        rl = self.data.setdefault("rl", {})
+        minute = int(now // 60)
+        b = rl.get(bucket)
+        if not isinstance(b, dict) or b.get("m") != minute:
+            b = {"m": minute, "n": 0}
+        b["n"] += 1
+        rl[bucket] = b
+        if b["n"] > limit:
+            return False, max(1, 60 - int(now % 60))
+        return True, 0
+
     # -- owner actions (caller must have authenticated the Maya owner)
     MODEL_PREFS = ("auto", "backup_only")
 

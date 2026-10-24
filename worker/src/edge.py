@@ -262,6 +262,36 @@ class App:
             return None
         return out.strip() + "\n\n(" + models.get(pref, "Free public model") + " answered.)"
 
+    # Maya's own per-minute burst limits - NOT provider quotas. Defends against loops/abuse burning the
+    # shared free pools; a human never legitimately exceeds these. Configurable per env, defaults below.
+    RL_DEFAULTS = {"chat": 20, "image": 3, "write": 30, "read": 60}
+
+    def _rl_bucket(self, method, path):
+        if path == "/v1/chat" and method == "POST":
+            return "chat"
+        if path == "/v1/image" and method == "POST":
+            return "image"
+        if method == "GET":
+            return "read"
+        return "write"
+
+    async def _rl(self, method, path):
+        bucket = self._rl_bucket(method, path)
+        try:
+            limit = int(os.environ.get("MAYA_RL_" + bucket.upper() + "_PER_MIN") or self.RL_DEFAULTS[bucket])
+            if limit < 1:
+                limit = self.RL_DEFAULTS[bucket]
+        except Exception:
+            limit = self.RL_DEFAULTS[bucket]
+        try:
+            allowed, retry = await self.state.rl_hit(bucket, limit)
+        except Exception:
+            return self.err(503, "rate_counter_unavailable")
+        if not allowed:
+            return 429, {"error": "maya_rate_limited", "bucket": bucket, "retry_after_s": retry,
+                         "note": "Maya's own per-minute burst limit (not a provider quota). Wait a few seconds and retry."}
+        return None
+
     # ---- router
     async def handle(self, method, path, headers, body):
         headers = {k.lower(): v for k, v in (headers or {}).items()}
@@ -281,6 +311,9 @@ class App:
             u, tok, e = await self.user(headers)
             if e:
                 return e
+            limited = await self._rl(method, path)
+            if limited:
+                return limited
             return await self._v1(method, path, u, tok, data, media=headers.get("x-maya-media") == "1")
         return self.err(404, "not_found")
 

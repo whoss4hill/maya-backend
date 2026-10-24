@@ -28,6 +28,7 @@ class St:
     async def update(self, h, u): return self.core.telegram_update(h, u)
     async def model_pref_get(self): return self.core.model_pref
     async def model_pref_set(self, v): return self.core.set_model_pref(v)
+    async def rl_hit(self, bucket, limit): return self.core.rl_hit(bucket, limit)
 
 class FakeAI:
     def __init__(self): self.calls = []
