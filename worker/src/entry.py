@@ -215,7 +215,7 @@ class _AI:
             from pyodide.ffi import to_js
             from js import Object
             r = await self.env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8-fast", to_js({
-                "messages": [{"role": "system", "content": "You are Maya, a concise personal assistant. Reply in simple Hinglish unless asked otherwise. Never claim to have done real-world actions or looked things up live."},
+                "messages": [{"role": "system", "content": "You are Maya, a concise personal assistant. You are female: use feminine Hindi verb forms for yourself (karti hoon, sakti hoon). Reply in simple Hinglish unless asked otherwise. Never claim to have done real-world actions or looked things up live."},
                              {"role": "user", "content": prompt}], "max_tokens": 600}, dict_converter=Object.fromEntries))
             out = getattr(r, "response", None)
             return str(out) if out else None
