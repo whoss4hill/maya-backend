@@ -6,6 +6,7 @@ import re
 import asyncio, json, os, re
 
 from net import Http
+import gmail_tools, github_tools
 from pdfgen import make_pdf, unsupported_chars, UnsupportedText
 
 
@@ -276,6 +277,23 @@ class App:
         else:
             await self._tg_process_inner(status, text, chat_id)
 
+    def _tool_reply(self, text):
+        """/mail and /gh: validate with the scoped logic; nothing is sent or pushed here. Honest status until credentials exist."""
+        if text.lower().startswith("/mail"):
+            c = gmail_tools.parse_command(text)
+            if c is None or c["op"] == "error":
+                return "Mail command samajh nahi aaya. Use: /mail, /mail from <naam>, /mail search <query>, /mail send to <email>: <text>"
+            if c["op"] == "draft":
+                return gmail_tools.draft_preview(c) + "\n\n(Gmail abhi connected nahi hai, isliye bhej nahi sakti.)"
+            return "Gmail abhi connected nahi hai. Pehle Gmail access setup hona baaki hai, mail nahi padh payi."
+        c = github_tools.parse_command(text)
+        if c is None or c["op"] == "error":
+            why = (c or {}).get("why", "format")
+            return "GitHub command refused (" + why + "). Use: /gh read <repo> <branch> <path> ya /gh edit <repo> <branch> <path>: <kya badalna hai>. Sirf maya repos, main branch pe kabhi nahi."
+        if not os.environ.get("MAYA_GITHUB_ENABLED"):
+            return "GitHub access abhi connected nahi hai. Command valid hai, par kuch padha/badla nahi."
+        return github_tools.plan_preview(c)
+
     async def _tg_process_inner(self, status, text, chat_id):
         try:
             if status == "paired":
@@ -334,6 +352,8 @@ class App:
                                     await self._tg_send(chat_id, "Audio could not be sent.")
                 elif low.startswith("/image") or low.startswith("/video"):
                     await self._tg_send(chat_id, "Image and video generation are not enabled yet.")
+                elif low.startswith("/mail") or low.startswith("/gh"):
+                    await self._tg_send(chat_id, self._tool_reply(text))
                 else:
                     hist = []
                     try:
