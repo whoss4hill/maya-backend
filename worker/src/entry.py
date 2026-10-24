@@ -288,8 +288,8 @@ class _AI:
                 self.last_image_error = None
             return str(img) if img else None
         except Exception as ex:
-            kind = "edit" if image_bytes else "gen"
-            self.last_image_error = (str(m) + "|" + kind + "|" + type(ex).__name__ + "|" + str(ex)[:120])[:200]
+            from state_core import Core
+            self.last_image_error = Core.safe_error_meta(m, "edit" if image_bytes else "gen", ex)
             print("ai image error", type(ex).__name__)
             return None
         # a None image without an exception is also a failure worth describing

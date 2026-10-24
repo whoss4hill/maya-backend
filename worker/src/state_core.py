@@ -134,6 +134,20 @@ class Core:
     # -- failure ring buffer: metadata only (stage + status + ts), NEVER content/audio/transcripts.
     FAIL_CAP = 20
 
+    @staticmethod
+    def safe_error_meta(model, kind, ex):
+        """Allowlisted structured failure metadata ONLY: model id, gen/edit kind, exception
+        CLASS name, and an HTTP-style numeric status code if one is extractable.
+        Never persists raw server error text: provider messages can echo prompts, URLs,
+        auth material or input data."""
+        import re as _re
+        code = getattr(ex, "status", None) or getattr(ex, "status_code", None)
+        if not isinstance(code, int):
+            m = _re.search(r"\b([1-5]\d\d)\b", str(ex))
+            code = int(m.group(1)) if m else None
+        return "|".join([str(model)[:80], str(kind)[:8], type(ex).__name__[:40],
+                         "code=" + str(code) if code else "code=-"])
+
     def fail_add(self, stage: str, status: str):
         fails = self.data.setdefault("fails", [])
         fails.append({"ts": int(time.time()), "stage": str(stage)[:40], "status": str(status)[:60]})

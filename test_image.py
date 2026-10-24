@@ -295,3 +295,18 @@ def test_edit_engine_failure_recorded_metadata_only(app):
     fails = app.state.core.data.get("fails", [])
     assert any(f["stage"] in ("image_edit_engine", "photo_edit") for f in fails)
     assert all(set(f) == {"ts", "stage", "status"} for f in fails)
+
+
+def test_error_meta_never_persists_reflected_prompt_or_token():
+    from state_core import Core
+    evil_prompt = "draw my password is Hunter22abcd"
+    evil = Exception('AI error 500: prompt rejected: "' + evil_prompt + '" token=sk-live-secret-123 url=https://x/?key=abc')
+    meta = Core.safe_error_meta("@cf/black-forest-labs/flux-2-klein-4b", "edit", evil)
+    assert evil_prompt not in meta and "sk-live-secret-123" not in meta and "key=abc" not in meta
+    assert "code=500" in meta and "edit" in meta and "Exception" in meta
+    class WithStatus(Exception):
+        status = 429
+    meta2 = Core.safe_error_meta("m", "gen", WithStatus("some verbose text with the user prompt inside"))
+    assert meta2.endswith("code=429") and "user prompt" not in meta2
+    meta3 = Core.safe_error_meta("m", "gen", ValueError("no code at all, just text"))
+    assert meta3.endswith("code=-")
