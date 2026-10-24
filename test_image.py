@@ -275,3 +275,23 @@ def test_photo_variant_picked_strictly_below_512():
     status, payload = tc.handle({"X-Telegram-Bot-Api-Secret-Token": "s3"}, upd, st, now=2000000000.0, owner="42")
     assert status == "photo"
     assert json.loads(payload)["file_id"] == "mid320", "largest variant strictly below 512x512 must be chosen"
+
+
+def test_photo_all_variants_oversized_is_honest_not_silent(app):
+    app.ai = FakeAI(base64.b64encode(b"jpg").decode())
+    T.run(app.state.image_mode_set(True))
+    T.run(app._tg_process("photo", json.dumps({"file_id": None, "no_small_variant": True, "caption": "edit"}), 42))
+    assert app.ai.calls == [], "no compliant variant must fail closed, never call the engine"
+    msgs = " ".join(k["json"]["text"] for m, u, k in app.http.calls if u.endswith("/sendMessage") and "json" in k)
+    assert "512" in msgs
+    fails = app.state.core.data.get("fails", [])
+    assert any(f["stage"] == "photo_edit" and f["status"] == "no_small_variant" for f in fails)
+
+
+def test_edit_engine_failure_recorded_metadata_only(app):
+    app.ai = FakeAI(None)
+    T.run(app.state.image_mode_set(True))
+    T.run(app._tg_process("photo", json.dumps({"file_id": "PH1", "caption": "make sky orange"}), 42))
+    fails = app.state.core.data.get("fails", [])
+    assert any(f["stage"] in ("image_edit_engine", "photo_edit") for f in fails)
+    assert all(set(f) == {"ts", "stage", "status"} for f in fails)

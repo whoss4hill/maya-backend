@@ -268,10 +268,12 @@ class App:
         if image_bytes:
             # edit request: the fallback engine accepts no input image, so falling back would
             # silently return a FRESH generation that ignores the owner's photo. Fail honestly.
+            await self._fail("image_edit_engine", getattr(self.ai, "last_image_error", None) or "none")
             return None, None, False
         second = await self.ai.image(prompt, model=FALLBACK_IMAGE_MODEL, image_bytes=image_bytes)
         if second:
             return second, IMAGE_ENGINE_NAMES[FALLBACK_IMAGE_MODEL], True
+        await self._fail("image_gen_engine", getattr(self.ai, "last_image_error", None) or "none")
         return None, None, False
 
     async def _public_pool_text(self, prompt, pref):
@@ -407,7 +409,8 @@ class App:
                     img_in = None
             img, engine, used_fb = await self._gen_image(prompt, image_bytes=img_in)
             if not img:
-                return self.err(502, "image_unavailable_or_daily_free_limit")
+                # root cause not established: engine error OR free daily allowance - never claim one
+                return self.err(502, "image_unavailable")
             return 200, {"image_base64": img, "mime": "image/jpeg", "model": engine, "fallback": used_fb}
         if path == "/v1/memories" and method == "GET":
             r = await self.http.get(f"{rest}/memories", headers=sb, params={
@@ -654,6 +657,9 @@ class App:
         file_id = meta.get("file_id")
         caption = (meta.get("caption") or "").strip()
         if not file_id:
+            if meta.get("no_small_variant"):
+                await self._fail("photo_edit", "no_small_variant")
+                await self._tg_send(chat_id, "Is photo ka koi chhota variant nahi mila jo editing ke liye safe ho (edit engine sirf 512px se chhoti input leta hai). Is photo ko main edit nahi kar paungi.")
             return
         try:
             r = await self.http.get(f"https://api.telegram.org/bot{self.tg_token}/getFile", params={"file_id": file_id}, timeout=self._clamped_timeout(6) or 6)

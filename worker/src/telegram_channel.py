@@ -73,8 +73,9 @@ def handle(headers: dict, update: dict, state: State, now: float = None, owner: 
     fit = [p for p in photos if int(p.get("width") or 0) < 512 and int(p.get("height") or 0) < 512 and p.get("file_id")]
     pick = max(fit, key=lambda p: int(p.get("file_size") or p.get("width") or 0)) if fit else None
     photo_id = pick.get("file_id") if pick else None
+    has_photos = bool(photos)
     if (chat.get("type") != "private" or str(frm.get("id")) != c["owner"] or str(chat.get("id")) != c["owner"]
-            or frm.get("is_bot") or not (is_text or file_id or photo_id)
+            or frm.get("is_bot") or not (is_text or file_id or photo_id or has_photos)
             or "forward_origin" in msg or "forward_date" in msg):
         return "ignored", None
     now = time.time() if now is None else now
@@ -89,8 +90,9 @@ def handle(headers: dict, update: dict, state: State, now: float = None, owner: 
     state.last_update_id = uid
     if is_text:
         return "ok", text.strip()[:2000]
-    if photo_id:
-        return "photo", json.dumps({"file_id": photo_id, "caption": str(msg.get("caption") or "")[:400]})
+    if has_photos:
+        return "photo", json.dumps({"file_id": photo_id, "no_small_variant": photo_id is None,
+                                    "caption": str(msg.get("caption") or "")[:400]})
     return "voice", json.dumps({"file_id": file_id, "mime": va.get("mime_type") or "audio/ogg",
                                 "duration": va.get("duration") or 0, "size": va.get("file_size") or 0})
 

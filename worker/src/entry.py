@@ -250,6 +250,7 @@ class _AI:
     """Cloudflare Workers AI binding (Free plan: 10,000 Neurons/day, then the platform refuses; no paid plan here)."""
     def __init__(self, env):
         self.env = env
+        self.last_image_error = None  # metadata only: model|kind|ExcType|short server error - never prompts/images
 
     async def image(self, prompt, model=None, image_bytes=None):
         # flux-1-schnell stays the default. FLUX.2 models (e.g. flux-2-klein-4b,
@@ -283,10 +284,17 @@ class _AI:
                 r = await self.env.AI.run(m, to_js({"prompt": prompt, "steps": 4},
                                                    dict_converter=Object.fromEntries))
             img = getattr(r, "image", None)
+            if img:
+                self.last_image_error = None
             return str(img) if img else None
         except Exception as ex:
+            kind = "edit" if image_bytes else "gen"
+            self.last_image_error = (str(m) + "|" + kind + "|" + type(ex).__name__ + "|" + str(ex)[:120])[:200]
             print("ai image error", type(ex).__name__)
             return None
+        # a None image without an exception is also a failure worth describing
+        self.last_image_error = str(m) + "|" + ("edit" if image_bytes else "gen") + "|empty_result"
+        return None
 
     async def text(self, prompt, model=None):
         try:
