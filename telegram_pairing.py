@@ -26,11 +26,13 @@ class Pairing:
     def bound_id(self):
         return self.s.get("bound_id")
 
-    def start(self, now: float = None) -> str:
+    def start(self, now: float = None, target_id=None) -> str:
         """Call only after the Maya owner is authenticated. Returns the code to show the owner in the app."""
         code = "".join(secrets.choice(ALPHABET) for _ in range(8))
         self.s["pending"] = {"hash": _h(code), "exp": (time.time() if now is None else now) + self.ttl, "fails": 0}
-        self.audit({"event": "pair_started"})
+        if isinstance(target_id, int) and not isinstance(target_id, bool):
+            self.s["pending"]["target"] = target_id  # code is only valid from this Telegram id
+        self.audit({"event": "pair_started", "targeted": target_id is not None})
         return code
 
     def claim(self, telegram_id: int, chat_type: str, text: str, now: float = None) -> str:
@@ -47,6 +49,10 @@ class Pairing:
         if not hmac.compare_digest(_h(parts[1].strip().upper()), p["hash"]):
             p["fails"] += 1
             self.audit({"event": "pair_bad_code"})
+            return "rejected"
+        if p.get("target") is not None and int(telegram_id) != p["target"]:
+            p["fails"] += 1
+            self.audit({"event": "pair_wrong_target"})
             return "rejected"
         old = self.s.get("bound_id")
         self.s["bound_id"] = int(telegram_id)
