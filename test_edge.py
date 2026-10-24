@@ -213,3 +213,20 @@ def test_gemini_call_exception_falls_to_next_model(app):
     app.http.post = post
     out = run(app._gemini("hi"))
     assert len(calls) >= 2 and out
+
+
+def test_voice_intent_exact_words_and_dispatch(app):
+    from edge import voice_intent
+    assert voice_intent("Ak vn send kro jisme hello golu mere jaan kaise ho kya kr rahe ho bolo") == "hello golu mere jaan kaise ho kya kr rahe ho"
+    assert voice_intent("voice note bhejo: good morning") == "good morning"
+    assert voice_intent("ek audio bana do jisme tum bolo happy birthday") == "tum bolo happy birthday" or "happy birthday" in voice_intent("ek audio bana do jisme tum bolo happy birthday")
+    assert voice_intent("voice assistant kya hota hai") is None
+    assert voice_intent("/voice hi") is None and voice_intent("hello") is None
+
+def test_vn_request_goes_to_tts_not_gemini_chat(app, monkeypatch):
+    sent = []
+    async def fake_tts(text): sent.append(text); return None
+    app._tts = fake_tts
+    run(app._tg_process("ok", "Ak vn send kro jisme hello golu mere jaan kaise ho kya kr rahe ho bolo", 42))
+    assert sent == ["hello golu mere jaan kaise ho kya kr rahe ho"]
+    assert not any("generateContent" in u for _, u, _ in app.http.calls)
