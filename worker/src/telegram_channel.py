@@ -66,8 +66,10 @@ def handle(headers: dict, update: dict, state: State, now: float = None, owner: 
     is_text = isinstance(text, str) and bool(text.strip())
     va = msg.get("voice") or msg.get("audio") or {}
     file_id = va.get("file_id") if isinstance(va, dict) else None
+    photos = msg.get("photo") if isinstance(msg.get("photo"), list) else []
+    photo_id = (photos[-1] or {}).get("file_id") if photos and isinstance(photos[-1], dict) else None
     if (chat.get("type") != "private" or str(frm.get("id")) != c["owner"] or str(chat.get("id")) != c["owner"]
-            or frm.get("is_bot") or not (is_text or file_id)
+            or frm.get("is_bot") or not (is_text or file_id or photo_id)
             or "forward_origin" in msg or "forward_date" in msg):
         return "ignored", None
     now = time.time() if now is None else now
@@ -82,6 +84,8 @@ def handle(headers: dict, update: dict, state: State, now: float = None, owner: 
     state.last_update_id = uid
     if is_text:
         return "ok", text.strip()[:2000]
+    if photo_id:
+        return "photo", json.dumps({"file_id": photo_id, "caption": str(msg.get("caption") or "")[:400]})
     return "voice", json.dumps({"file_id": file_id, "mime": va.get("mime_type") or "audio/ogg",
                                 "duration": va.get("duration") or 0, "size": va.get("file_size") or 0})
 

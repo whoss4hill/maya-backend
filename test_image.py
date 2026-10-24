@@ -5,8 +5,8 @@ from test_edge import app  # noqa: F401
 class FakeAI:
     """out may be a value (returned for every model) or a dict model->value."""
     def __init__(self, out): self.out, self.calls = out, []
-    async def image(self, p, model=None):
-        self.calls.append((p, model))
+    async def image(self, p, model=None, image_bytes=None):
+        self.calls.append((p, model, image_bytes))
         return self.out.get(model) if isinstance(self.out, dict) else self.out
 
 def post(app, body): return T.run(app.handle("POST", "/v1/image", T.A, json.dumps(body)))
@@ -187,7 +187,7 @@ def test_image_fallback_labels_actual_engine(app):
     app.ai = FakeAI({DEFAULT_IMAGE_MODEL: None, FALLBACK_IMAGE_MODEL: "RkFMTEJBQ0s="})
     s, b = post(app, {"prompt": "a kite"})
     assert s == 200 and b["model"] == "FLUX.1 Schnell" and b["fallback"] is True
-    assert [m for _, m in app.ai.calls] == [DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL]
+    assert [c[1] for c in app.ai.calls] == [DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL]
 
 def test_tg_image_fallback_caption_names_actual_engine(app):
     from state_core import DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL
@@ -201,3 +201,48 @@ def test_tg_image_primary_has_plain_caption(app):
     T.run(app._tg_process("ok", "/image a red kite", 42))
     caps = [(k.get("fields") or {}).get("caption", "") for u, k in files(app)]
     assert caps and all("made with" not in c for c in caps)
+
+
+def _photo_meta(caption="make the sky orange"):
+    return json.dumps({"file_id": "PH1", "caption": caption})
+
+
+def test_image_mode_command_on_off_status(app):
+    T.run(app._tg_process("ok", "/image on", 42))
+    assert T.run(app.state.image_mode_get()) is True
+    msgs = T.run(app._tg_process("ok", "/image status", 42))  # noqa - reply sent via http fake
+    T.run(app._tg_process("ok", "/image off", 42))
+    assert T.run(app.state.image_mode_get()) is False
+
+
+def test_photo_ignored_when_mode_off(app):
+    app.ai = FakeAI(base64.b64encode(b"jpg").decode())
+    assert T.run(app.state.image_mode_get()) is False
+    T.run(app._tg_process("photo", _photo_meta(), 42))
+    assert app.ai.calls == []  # no edit without image mode
+    urls = [u for m, u, k in app.http.calls]
+    assert not any("getFile" in u for u in urls)
+
+
+def test_photo_edit_when_mode_on(app):
+    b64img = base64.b64encode(b"EDITEDJPG").decode()
+    app.ai = FakeAI(b64img)
+    T.run(app.state.image_mode_set(True))
+    T.run(app._tg_process("photo", _photo_meta(), 42))
+    urls = [u for m, u, k in app.http.calls]
+    assert any("getFile" in u for u in urls), "must resolve the Telegram photo file"
+    assert any("file/bot" in u for u in urls), "must download the photo bytes"
+    assert app.ai.calls and app.ai.calls[0][2] is not None, "downloaded photo bytes must reach the image engine"
+    sent_photos = [k for m, u, k in app.http.calls if u.endswith("/sendPhoto")]
+    assert sent_photos, "edited photo must be sent back"
+
+
+def test_voice_failure_is_recorded_metadata_only(app):
+    app.state.core.data["fails"] = []
+    app.http.calls.clear()
+    # force STT failure: make generateContent return an error
+    app.http.stt_status = 500
+    T.run(app._tg_process("voice", json.dumps({"file_id": "V1", "mime": "audio/ogg", "duration": 3, "size": 12000}), 42))
+    fails = app.state.core.data.get("fails", [])
+    assert fails and all(set(f) == {"ts", "stage", "status"} for f in fails), "metadata-only entries"
+    assert any(f["stage"] == "voice_stt" for f in fails)

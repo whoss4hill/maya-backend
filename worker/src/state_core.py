@@ -122,6 +122,26 @@ class Core:
         self.data["voice_mode"] = bool(on)
         self._audit({"event": "voice_mode", "on": bool(on)})
 
+    # -- Telegram image mode: when on, an owner photo+caption is an EDIT request; ordinary text stays chat.
+    @property
+    def image_mode(self):
+        return bool(self.data.get("image_mode"))
+
+    def set_image_mode(self, on: bool):
+        self.data["image_mode"] = bool(on)
+        self._audit({"event": "image_mode", "on": bool(on)})
+
+    # -- failure ring buffer: metadata only (stage + status + ts), NEVER content/audio/transcripts.
+    FAIL_CAP = 20
+
+    def fail_add(self, stage: str, status: str):
+        fails = self.data.setdefault("fails", [])
+        fails.append({"ts": int(time.time()), "stage": str(stage)[:40], "status": str(status)[:60]})
+        del fails[:-self.FAIL_CAP]
+
+    def fail_get(self, n: int = 10):
+        return list(self.data.get("fails", []))[-int(n):]
+
     def pair_start(self, now=None, target_id=None):
         return self._pairing().start(now, target_id)
 
@@ -143,7 +163,7 @@ class Core:
             return status, None, (self.bound_id if status == "paired" else None)
         status, text = handle(headers, update, st, now=now, owner=str(bound))
         self._save_state(st)
-        return status, text, (bound if status in ("ok", "voice") else None)
+        return status, text, (bound if status in ("ok", "voice", "photo") else None)
 
     def _unbound(self, headers, update, st, now):
         """Nothing is paired: the only thing that can happen is a valid `/pair CODE` from a private chat."""

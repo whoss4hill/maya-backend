@@ -3,3 +3,4 @@ __pycache__/
 
 # never commit local dev secrets
 .dev.vars
+worker/.wrangler/

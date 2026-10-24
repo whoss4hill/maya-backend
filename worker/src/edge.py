@@ -257,14 +257,15 @@ class App:
             note = "(Backup AI model answered, as selected in settings.)" if chosen else "(Backup AI model answered because the main one was unavailable.)"
         return out.strip() + "\n\n" + note
 
-    async def _gen_image(self, prompt):
+    async def _gen_image(self, prompt, image_bytes=None):
         """Returns (b64, engine_label, used_fallback). Tries the user's chosen engine,
-        then the fallback; labels always name the ACTUAL engine that produced the image."""
+        then the fallback; labels always name the ACTUAL engine that produced the image.
+        image_bytes (optional) = owner-supplied source photo for an EDIT request."""
         from state_core import DEFAULT_IMAGE_MODEL, FALLBACK_IMAGE_MODEL, IMAGE_ENGINE_NAMES
-        first = await self.ai.image(prompt, model=DEFAULT_IMAGE_MODEL)
+        first = await self.ai.image(prompt, model=DEFAULT_IMAGE_MODEL, image_bytes=image_bytes)
         if first:
             return first, IMAGE_ENGINE_NAMES[DEFAULT_IMAGE_MODEL], False
-        second = await self.ai.image(prompt, model=FALLBACK_IMAGE_MODEL)
+        second = await self.ai.image(prompt, model=FALLBACK_IMAGE_MODEL, image_bytes=image_bytes)
         if second:
             return second, IMAGE_ENGINE_NAMES[FALLBACK_IMAGE_MODEL], True
         return None, None, False
@@ -390,7 +391,17 @@ class App:
             ai = getattr(self, "ai", None)
             if ai is None:
                 return self.err(501, "image_not_configured")
-            img, engine, used_fb = await self._gen_image(prompt)
+            img_in = None
+            b64in = data.get("image_b64")
+            if isinstance(b64in, str) and b64in:
+                import base64 as _b64
+                try:
+                    img_in = _b64.b64decode(b64in)
+                    if len(img_in) > 4 * 1024 * 1024:
+                        img_in = None
+                except Exception:
+                    img_in = None
+            img, engine, used_fb = await self._gen_image(prompt, image_bytes=img_in)
             if not img:
                 return self.err(502, "image_unavailable_or_daily_free_limit")
             return 200, {"image_base64": img, "mime": "image/jpeg", "model": engine, "fallback": used_fb}
@@ -567,6 +578,7 @@ class App:
                     print("timeout recovery error", type(ex).__name__)
             if not delivered:
                 try:
+                    await self._fail("tg_job", "timeout " + str(status))
                     await self._tg_send(chat_id, "That took too long and I could not finish it. Please send it again in a bit.")
                 except Exception:
                     pass
@@ -609,6 +621,73 @@ class App:
             return txt[:2000]
         return None
 
+    async def _fail(self, stage, status):
+        """Metadata-only failure record (stage + status, never content). Bounded ring in the DO;
+        readable via the owner-JWT status route. Never raises."""
+        try:
+            await self.state.fail_add(stage, status)
+        except Exception:
+            pass
+
+    async def _photo(self, chat_id, meta_json):
+        """Owner photo: only an EDIT request when image mode is ON; otherwise a hint.
+        Runs under the watchdog like chat; fallback engine schnell does not accept an input
+        image, so edits only run on the primary engine."""
+        import json as _json
+        try:
+            meta = _json.loads(meta_json)
+        except Exception:
+            meta = {}
+        if not await self.state.image_mode_get():
+            await self._tg_send(chat_id, "Photo mil gayi. Photo edit karne ke liye pehle image mode chalu karo: /image on (band karne ke liye /image off).")
+            return
+        if getattr(self, "ai", None) is None:
+            await self._tg_send(chat_id, "Image editing is not set up on this server.")
+            return
+        file_id = meta.get("file_id")
+        caption = (meta.get("caption") or "").strip()
+        if not file_id:
+            return
+        try:
+            r = await self.http.get(f"https://api.telegram.org/bot{self.tg_token}/getFile", params={"file_id": file_id}, timeout=self._clamped_timeout(6) or 6)
+            fpath = (r.json().get("result") or {}).get("file_path") if r.status_code == 200 else None
+        except Exception as ex:
+            fpath = None
+            print("photo getFile error", type(ex).__name__)
+        if not fpath:
+            await self._fail("photo_edit", "getFile empty")
+            await self._tg_send(chat_id, "I could not download that photo - please send it again.")
+            return
+        try:
+            st, img = await self.http.get_bytes(f"https://api.telegram.org/file/bot{self.tg_token}/{fpath}", timeout=self._clamped_timeout(10) or 10)
+            if st != 200:
+                img = b""
+        except Exception as ex:
+            img = b""
+            print("photo download error", type(ex).__name__)
+        if not img or len(img) > 20 * 1024 * 1024:
+            await self._fail("photo_edit", "download failed")
+            await self._tg_send(chat_id, "I could not download that photo - please send it again.")
+            return
+        prompt = caption or "enhance this photo"
+        b64, engine, used_fb = await self._gen_image(prompt, image_bytes=img)
+        if not b64:
+            await self._fail("photo_edit", "engine none " + str(getattr(self, "last_gemini_status", "?")))
+            await self._tg_send(chat_id, "I could not edit the photo right now. The free daily image allowance may be used up or the service is busy. Nothing was charged. Please try again later.")
+            return
+        import base64
+        jpg = base64.b64decode(b64)
+        cap = (prompt[:180]) + ("\n(edited with " + engine + ")" if engine else "")
+        r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendPhoto",
+                                      {"chat_id": chat_id, "caption": cap}, "maya-edited.jpg", jpg, mime="image/jpeg", field="photo")
+        print("tg_sendPhoto(edit) status", r.status_code)
+        if r.status_code >= 400:
+            r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                          {"chat_id": chat_id, "caption": cap}, "maya-edited.jpg", jpg, mime="image/jpeg")
+            print("tg_sendDocument(edit) status", r.status_code)
+            if r.status_code >= 400:
+                await self._tg_send(chat_id, "The edited photo was made but could not be sent.")
+
     async def _voice_note(self, chat_id, meta_json):
         """Owner voice note -> Telegram file download -> Gemini STT -> normal chat reply. Never silently ignored:
         every failure path sends the owner a clear ack."""
@@ -623,9 +702,11 @@ class App:
         if not fid:
             return
         if dur > self.VOICE_MAX_SECONDS or (size and size > self.VOICE_MAX_BYTES):
+            await self._fail("voice_note", "too_long")
             await self._tg_send(chat_id, "That voice note is too long for me (about 2 minutes max). Please send a shorter one or type it.")
             return
         if mime not in self.VOICE_MIMES:
+            await self._fail("voice_note", "bad_mime " + mime)
             await self._tg_send(chat_id, "I could not read that audio format. A normal voice note works best - or just type it.")
             return
         try:
@@ -635,6 +716,7 @@ class App:
             fp = None
             print("voice getFile error", type(ex).__name__)
         if not fp:
+            await self._fail("voice_note", "getFile empty")
             await self._tg_send(chat_id, "I could not download that voice note - please send it again or type it.")
             return
         try:
@@ -645,6 +727,7 @@ class App:
             data = b""
             print("voice download error", type(ex).__name__)
         if not data or len(data) > 20 * 1024 * 1024:  # Telegram bot download hard cap
+            await self._fail("voice_note", "download failed" + (" oversized" if data else ""))
             await self._tg_send(chat_id, "I could not download that voice note - please send it again or type it.")
             return
         if mime in ("audio/wav", "audio/x-wav") and self._wav_is_silence(data):
@@ -656,9 +739,11 @@ class App:
             transcript = None
             print("stt error", type(ex).__name__)
         if transcript is None:
+            await self._fail("voice_stt", "none " + str(getattr(self, "last_gemini_status", "?")))
             await self._tg_send(chat_id, "I could not make out that voice note right now - please try again or type it.")
             return
         if not transcript:
+            await self._fail("voice_stt", "empty_transcript")
             await self._tg_send(chat_id, "I could not hear any words in that voice note - please try again or type it.")
             return
         # The transcript is untrusted recognition, not typed intent: plain chat answers are fine, but
@@ -783,6 +868,8 @@ class App:
         try:
             if status == "paired":
                 await self._tg_send(chat_id, "Paired. Maya is now connected to this chat only.")
+            elif status == "photo" and text:
+                await self._photo(chat_id, text)
             elif status == "ok" and text and secret_guard.looks_like_secret(text):
                 await self._tg_send(chat_id, secret_guard.NOTICE + " You may also delete that message from this chat.")
             elif status == "ok" and text:
@@ -841,8 +928,45 @@ class App:
                             await self._tg_send(chat_id, "Could not generate the audio right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + ").")
                         elif not await self._send_tts_out(chat_id, out):
                             await self._tg_send(chat_id, "Audio could not be sent.")
-                elif low.startswith("/image") or (image_intent(text) is not None and getattr(self, "ai", None) is not None):
-                    ip = text[6:].strip() if low.startswith("/image") else image_intent(text)
+                elif low.startswith("/image"):
+                    raw = text[6:].strip()
+                    rawlow = raw.lower()
+                    if rawlow in ("on", "off", "status"):
+                        on = (rawlow == "on")
+                        if rawlow == "status":
+                            cur = await self.state.image_mode_get()
+                            await self._tg_send(chat_id, "Image mode " + ("ON - photo bhejo to main usse edit karung" + "i" + ", text se tasveer banayengi. Band karne ke liye /image off." if cur else "OFF - photos par edit nahi hota. Chalu karne ke liye /image on."))
+                        else:
+                            await self.state.image_mode_set(on)
+                            if on:
+                                await self._tg_send(chat_id, "Image mode ON. Photo bhejo (caption me kya karna hai likho) to main edit karke wapas bhejung" + "i" + ". Ya text me bolo kya banao. Band karne ke liye /image off.")
+                            else:
+                                await self._tg_send(chat_id, "Image mode OFF. Ab photos par edit nahi hoga. /image <kya banana hai> se aise bhi tasveer ban sakti hai.")
+                    else:
+                        ip = raw
+                        if not ip or len(ip) > 400:
+                            await self._tg_send(chat_id, "Usage: /image <what to draw> (up to 400 characters), /image on ya /image off image mode ke liye.")
+                        elif getattr(self, "ai", None) is None:
+                            await self._tg_send(chat_id, "Image generation is not set up on this server.")
+                        else:
+                            b64, engine, used_fb = await self._gen_image(ip)
+                            caption = ip[:200] + ("\n(made with " + engine + " - the usual image engine was unavailable)" if used_fb else "")
+                            if not b64:
+                                await self._tg_send(chat_id, "I could not make the image right now. The free daily image allowance may be used up or the service is busy. Nothing was charged. Please try again later.")
+                            else:
+                                import base64
+                                jpg = base64.b64decode(b64)
+                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendPhoto",
+                                                              {"chat_id": chat_id, "caption": caption}, "maya-image.jpg", jpg, mime="image/jpeg", field="photo")
+                                print("tg_sendPhoto status", r.status_code)
+                                if r.status_code >= 400:
+                                    r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                                                  {"chat_id": chat_id, "caption": caption}, "maya-image.jpg", jpg, mime="image/jpeg")
+                                    print("tg_sendDocument(jpg) status", r.status_code)
+                                    if r.status_code >= 400:
+                                        await self._tg_send(chat_id, "The image was made but could not be sent.")
+                elif image_intent(text) is not None and getattr(self, "ai", None) is not None:
+                    ip = image_intent(text)
                     if not ip or len(ip) > 400:
                         await self._tg_send(chat_id, "Usage: /image <what to draw> (up to 400 characters).")
                     elif getattr(self, "ai", None) is None:

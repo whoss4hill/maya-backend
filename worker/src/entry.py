@@ -59,6 +59,15 @@ class MayaState(DurableObject):
     async def voice_mode_set(self, on):
         core = await self._core(); core.set_voice_mode(bool(on)); await self._save(core)
 
+    async def image_mode_get(self):
+        core = await self._core(); return json.dumps(core.image_mode)
+
+    async def image_mode_set(self, on):
+        core = await self._core(); core.set_image_mode(bool(on)); await self._save(core)
+
+    async def fail_add(self, stage, status):
+        core = await self._core(); core.fail_add(stage, status); await self._save(core)
+
     async def model_pref_get(self):
         core = await self._core(); return core.model_pref
 
@@ -159,6 +168,7 @@ class MayaState(DurableObject):
     async def status(self):
         core = await self._core(); b = core.bound_id
         return json.dumps({"bound": b is not None, "enabled": core.data["tg"]["owner_enabled"],
+                           "recent_failures": core.fail_get(10),
                            "bound_suffix": str(b)[-4:] if b else None,
                            "bound_sha256_12": __import__("hashlib").sha256(str(b).encode()).hexdigest()[:12] if b else None})
 
@@ -184,6 +194,15 @@ class DOState:
 
     async def voice_mode_set(self, on):
         await self.stub.voice_mode_set(on)
+
+    async def image_mode_get(self):
+        return json.loads(await self.stub.image_mode_get())
+
+    async def image_mode_set(self, on):
+        await self.stub.image_mode_set(on)
+
+    async def fail_add(self, stage, status):
+        await self.stub.fail_add(str(stage), str(status))
 
     async def model_pref_get(self):
         return await self.stub.model_pref_get()
@@ -232,10 +251,12 @@ class _AI:
     def __init__(self, env):
         self.env = env
 
-    async def image(self, prompt, model=None):
+    async def image(self, prompt, model=None, image_bytes=None):
         # flux-1-schnell stays the default. FLUX.2 models (e.g. flux-2-klein-4b,
         # runtime-verified 2026-10-24) require multipart input: the binding takes
         # multipart={body, contentType} from a serialized FormData, NOT plain fields.
+        # image_bytes (optional) = source photo for an EDIT request (FLUX.2 klein unifies
+        # generation + editing); when absent this is plain text-to-image.
         try:
             from pyodide.ffi import to_js
             from js import Object
@@ -245,8 +266,12 @@ class _AI:
                 from js import FormData, Response as _JsResponse
                 form = FormData.new()
                 form.append("prompt", prompt)
-                form.append("width", "1024")
-                form.append("height", "1024")
+                if image_bytes:
+                    from js import File
+                    form.append("image", File.new([to_js(bytearray(image_bytes))], "input.jpg"))
+                else:
+                    form.append("width", "1024")
+                    form.append("height", "1024")
                 fr = _JsResponse.new(form)
                 payload = to_js({"multipart": {"body": fr.body,
                                                "contentType": fr.headers.get("content-type")}},

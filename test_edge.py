@@ -13,6 +13,9 @@ class St:
     async def set_enabled(self, on): self.core.set_enabled(on)
     async def voice_mode_get(self): return self.core.voice_mode
     async def voice_mode_set(self, on): self.core.set_voice_mode(on)
+    async def image_mode_get(self): return self.core.image_mode
+    async def image_mode_set(self, on): self.core.set_image_mode(on)
+    async def fail_add(self, stage, status): self.core.fail_add(stage, status)
     async def revoke(self): self.core.revoke()
     async def model_pref_get(self): return self.core.model_pref
     async def model_pref_set(self, v): self.core.set_model_pref(v)
@@ -24,11 +27,18 @@ class St:
     async def status(self): return {"bound": self.core.bound_id is not None, "enabled": self.core.data["tg"]["owner_enabled"], "bound_suffix": None}
 
 class FakeHttp:
+    stt_status = 200
     def __init__(self): self.calls = []
+    async def get_bytes(self, u, **k):
+        self.calls.append(("GETB", u, k))
+        return 200, b"FILEBYTES"
     async def _r(self, m, url, **k):
         self.calls.append((m, url, k))
         if url.endswith("/auth/v1/user"): return Resp(200, json.dumps({"id": "aaa-1"}))
-        if "generateContent" in url: return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
+        if "getFile" in url: return Resp(200, json.dumps({"ok": True, "result": {"file_path": "files/p1.oga"}}))
+        if "generateContent" in url:
+            if self.stt_status != 200: return Resp(self.stt_status, "{}")
+            return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
         if "auth_tokens" in url: return Resp(200, json.dumps({"name": "auth_tokens/deadbeef1234", "expireTime": "2099-01-01T00:00:00Z"}))
         if "/rest/v1/memories" in url and m == "POST": return Resp(201, json.dumps([{"id": "m1"}]))
         return Resp(200, "[]")
