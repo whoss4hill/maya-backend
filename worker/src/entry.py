@@ -73,8 +73,6 @@ class MayaState(DurableObject):
             return
         job["state"] = "lost"
         await self.ctx.storage.put("job", json.dumps(job))
-        if str(job.get("note", "")).startswith("bgtest"):
-            return  # controlled test: no outbound message
         core = await self._core(); b = core.bound_id
         if b:
             from net import Http

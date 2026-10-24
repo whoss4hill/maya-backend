@@ -275,22 +275,6 @@ class App:
             data = {}
         if path == "/health" and method == "GET":
             return 200, {"ok": True, "service": "maya-backend-edge"}
-        if path in ("/telegram/bgtest", "/telegram/bgtest-alarm") and hasattr(self.state, "job_set"):
-            import hmac as _h
-            if not _h.compare_digest(headers.get("x-telegram-bot-api-secret-token", "").encode(), os.environ.get("MAYA_TELEGRAM_SECRET", "x").encode()):
-                return self.err(403, "forbidden")
-            if method == "POST":
-                async def _bg():
-                    await asyncio.sleep(5)
-                    await self.state.job_set("bgtest-finished", "after 5s background sleep")
-                await self.state.job_set("bgtest-started", "")
-                if path.endswith("-alarm"):
-                    await self.state.job_set("processing", "bgtest-alarm", 5)  # nobody finishes it: alarm must mark it lost, no outbound
-                    return 200, {"scheduled": "alarm"}
-                if getattr(self, "defer", None):
-                    self.defer(_bg())
-                return 200, {"scheduled": True}
-            return 200, await self.state.job_get()
         if path == "/telegram/webhook" and method == "POST":
             return await self._tg_webhook(headers, data)
         if path.startswith("/v1/"):
