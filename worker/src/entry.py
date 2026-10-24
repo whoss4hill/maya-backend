@@ -44,6 +44,12 @@ class MayaState(DurableObject):
     async def set_enabled(self, on):
         core = await self._core(); core.set_enabled(bool(on)); await self._save(core)
 
+    async def model_pref_get(self):
+        core = await self._core(); return core.model_pref
+
+    async def model_pref_set(self, v):
+        core = await self._core(); core.set_model_pref(v); await self._save(core)
+
     async def revoke(self):
         core = await self._core(); core.revoke(); await self._save(core)
 
@@ -157,6 +163,12 @@ class DOState:
     async def set_enabled(self, on):
         await self.stub.set_enabled(on)
 
+    async def model_pref_get(self):
+        return await self.stub.model_pref_get()
+
+    async def model_pref_set(self, v):
+        await self.stub.model_pref_set(v)
+
     async def revoke(self):
         await self.stub.revoke()
 
@@ -192,38 +204,6 @@ def _hdrs(request):
     return h
 
 
-class _AI:
-    """Cloudflare Workers AI binding (Free plan: 10,000 Neurons/day, then the platform refuses; no paid plan here)."""
-    def __init__(self, env):
-        self.env = env
-
-    async def image(self, prompt):
-        try:
-            from pyodide.ffi import to_js
-            from js import Object
-            r = await self.env.AI.run("@cf/black-forest-labs/flux-1-schnell",
-                                      to_js({"prompt": prompt, "steps": 4}, dict_converter=Object.fromEntries))
-            img = getattr(r, "image", None)
-            return str(img) if img else None
-        except Exception as ex:
-            print("ai image error", type(ex).__name__)
-            return None
-
-
-    async def text(self, prompt):
-        try:
-            from pyodide.ffi import to_js
-            from js import Object
-            r = await self.env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8-fast", to_js({
-                "messages": [{"role": "system", "content": "You are Maya, a concise personal assistant. You are female: use feminine Hindi verb forms for yourself (karti hoon, sakti hoon). Reply in simple Hinglish unless asked otherwise. Never claim to have done real-world actions or looked things up live."},
-                             {"role": "user", "content": prompt}], "max_tokens": 600}, dict_converter=Object.fromEntries))
-            out = getattr(r, "response", None)
-            return str(out) if out else None
-        except Exception as ex:
-            print("ai text error", type(ex).__name__)
-            return None
-
-
 class Default(WorkerEntrypoint):
     async def fetch(self, request):
         _load_env(self.env)
@@ -236,7 +216,6 @@ class Default(WorkerEntrypoint):
         stub = self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya"))
         app = App(http=Http(), state=DOState(stub))
         import asyncio as _a
-        app.ai = _AI(self.env)
         app.defer = lambda coro: self.ctx.waitUntil(_a.ensure_future(coro))
         if path == "/v1/phone/ws":
             if str(request.headers.get("upgrade") or "").lower() != "websocket":
