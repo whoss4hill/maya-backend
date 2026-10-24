@@ -95,7 +95,10 @@ def test_image_intent_positive(t): assert E.image_intent(t)
 @pytest.mark.parametrize("t", [
     "send me my pictures from the gallery", "find the image I saved yesterday", "photo of me edit this",
     "open the picture in my gallery", "make a reminder for 5 pm", "what is an image file format",
-    "bana do ek reminder", "forward this image to mom", "/image a kite", "delete that picture"])
+    "bana do ek reminder", "forward this image to mom",
+    "make a picture frame for my room", "draw a picture of a house costs how much?", 'translate "make an image of a dog" to Hindi',
+    'he said "draw a picture of a cat" yesterday', "what size should the image be", "how to make an image smaller",
+    "rewrite this: create a picture of my family", "write a caption for the image of my dog", "/image a kite", "delete that picture"])
 def test_image_intent_negative(t): assert not E.image_intent(t)
 
 def test_tg_natural_image_request_runs_image(app):
