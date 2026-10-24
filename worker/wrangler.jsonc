@@ -4,6 +4,7 @@
   "main": "src/entry.py",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["python_workers"],
+  "ai": { "binding": "AI" },
   "vars": { "MAYA_REQUIRE_JWT_MODE": "1" },
   "durable_objects": { "bindings": [{ "name": "MAYA_STATE", "class_name": "MayaState" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MayaState"] }],
