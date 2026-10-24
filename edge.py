@@ -153,7 +153,7 @@ class App:
             data = {}
         if path == "/health" and method == "GET":
             return 200, {"ok": True, "service": "maya-backend-edge"}
-        if path == "/telegram/bgtest" and hasattr(self.state, "job_set"):
+        if path in ("/telegram/bgtest", "/telegram/bgtest-alarm") and hasattr(self.state, "job_set"):
             import hmac as _h
             if not _h.compare_digest(headers.get("x-telegram-bot-api-secret-token", "").encode(), os.environ.get("MAYA_TELEGRAM_SECRET", "x").encode()):
                 return self.err(403, "forbidden")
@@ -162,6 +162,9 @@ class App:
                     await asyncio.sleep(5)
                     await self.state.job_set("bgtest-finished", "after 5s background sleep")
                 await self.state.job_set("bgtest-started", "")
+                if path.endswith("-alarm"):
+                    await self.state.job_set("processing", "bgtest-alarm", 5)  # nobody finishes it: alarm must mark it lost, no outbound
+                    return 200, {"scheduled": "alarm"}
                 if getattr(self, "defer", None):
                     self.defer(_bg())
                 return 200, {"scheduled": True}
@@ -283,7 +286,7 @@ class App:
                 await self._tg_send(chat_id, "My previous reply did not finish. If you did not get it, please send it again.")
         except Exception as ex:
             print("stale job check error", type(ex).__name__)
-        await self._job("processing", status, text)
+        await self._job("processing", status, text, alarm_s=45)
         if getattr(self, "defer", None):
             self.defer(self._tg_guarded(status, text, chat_id))
         else:
@@ -292,11 +295,11 @@ class App:
 
     BUDGET_S = 24  # Workers keep background work alive ~30 s after the response
 
-    async def _job(self, state, status="", text=""):
+    async def _job(self, state, status="", text="", alarm_s=0):
         """Durable job record in the Durable Object: processing -> done | error | timeout (never silent loss)."""
         try:
             if hasattr(self.state, "job_set"):
-                await self.state.job_set(state, str(text)[:60])
+                await self.state.job_set(state, str(text)[:60], alarm_s)
         except Exception as ex:
             print("job_set error", type(ex).__name__)
 
