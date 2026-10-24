@@ -24,6 +24,15 @@ NEG = [
     "set a reminder for 5 pm",
     "Hello golu mere jaan kaise ho",
     "the token ring network is old",
+    "Use the password field in the form: <input type=\"password\" name=\"pwd\">",
+    "Help: to reset, click Forgot password on the login page",
+    "In Python write x = os.environ[\"API_KEY\"] instead of hardcoding it",
+    "curl -H \"Authorization: Bearer $TOKEN\" https://example.com/api",
+    "git config user.password is not a thing, use a credential helper",
+    "The API key goes in the header named X-Api-Key",
+    "def check_password(user, password): return hash(password) == user.hash",
+    "Don't share your password or CVV with anyone",
+    "```\nexport PASSWORD=<your-password>\n```",
 ]
 
 @pytest.mark.parametrize("t", POS)
