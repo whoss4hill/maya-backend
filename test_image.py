@@ -110,3 +110,13 @@ def test_tg_natural_request_without_ai_falls_to_normal_chat(app):
     app.tg_token = "T"
     T.run(app._tg_process("ok", "ek red kite ki image bana do", 42))
     assert not files(app)
+
+
+def test_oversized_v1_body_rejected_before_anything(app):
+    big = json.dumps({"message": "a" * 40000})
+    s, b = T.run(app.handle("POST", "/v1/chat", T.A, big))
+    assert s == 413 and not app.http.calls
+
+def test_normal_body_still_ok(app):
+    s, b = T.run(app.handle("POST", "/v1/chat", T.A, json.dumps({"message": "hello"})))
+    assert s == 200
