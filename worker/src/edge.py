@@ -135,7 +135,7 @@ class App:
         try:
             status, raw = await self.http.post_bytes(
                 "https://api.elevenlabs.io/v1/text-to-speech/" + vid + "?output_format=opus_48000_64",
-                headers={"xi-api-key": key},
+                headers={"xi-api-key": key}, timeout=self._clamped_timeout(12) or 12,
                 json={"text": str(text)[:1500], "model_id": "eleven_multilingual_v2"})
             print("elevenlabs tts status", status)
             if status == 200 and raw:
@@ -152,9 +152,13 @@ class App:
         if el is not None:
             return el
         for model in self.TTS_MODELS:
+            to = self._clamped_timeout(9)
+            if to is None:
+                print("tts skipped: job budget spent")
+                return None
             r = await self.http.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key},
+                headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, timeout=to,
                 json={"contents": [{"parts": [{"text": text}]}], "generationConfig": {"responseModalities": ["AUDIO"],
                       "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}}})
             self.last_gemini_status = r.status_code
@@ -505,9 +509,11 @@ class App:
             print("job_set error", type(ex).__name__)
 
     async def _tg_guarded(self, status, text, chat_id):
+        self._job_start = time.monotonic()
         try:
             await asyncio.wait_for(self._tg_process(status, text, chat_id), self.BUDGET_S)
             await self._job("done")
+            print("tg job secs", round(time.monotonic() - self._job_start, 1))
         except asyncio.TimeoutError:
             await self._job("timeout")
             print("tg budget exceeded")
@@ -530,9 +536,13 @@ class App:
         b64 = base64.b64encode(data).decode()
         models = [self.model] + [m for m in self.FALLBACK_MODELS if m != self.model]
         for model in models:
+            to = self._clamped_timeout(10)
+            if to is None:
+                print("stt skipped: job budget spent")
+                return None
             r = await self.http.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key},
+                headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, timeout=to,
                 json={"contents": [{"parts": [
                     {"inlineData": {"mimeType": mime, "data": b64}},
                     {"text": "Transcribe this voice message exactly as spoken, in the original language. "
@@ -654,6 +664,18 @@ class App:
         except Exception as ex:
             print("voice_mode read error", type(ex).__name__)
             return False
+
+    def _left(self):
+        """Seconds of wall budget left in this webhook job, or None outside a guarded job."""
+        start = getattr(self, "_job_start", None)
+        return None if start is None else max(0.0, self.BUDGET_S - (time.monotonic() - start))
+
+    def _clamped_timeout(self, default):
+        """Per-call timeout capped by the remaining job budget; None = no usable time, skip the call."""
+        left = self._left()
+        if left is None:
+            return default
+        return max(2.0, min(default, left - 1.0)) if left > 3.0 else None
 
     async def _action(self, chat_id, action):
         try:
@@ -813,10 +835,15 @@ class App:
                                 await self.state.add_turn(text, reply)
                         except Exception as ex:
                             print("history write error", type(ex).__name__)
+                        left = self._left()
                         if await self._voice_mode_on() and len(reply) <= 1500:
                             # Voice mode: the answer is SPOKEN, not duplicated as text. If TTS or the audio send fails,
                             # the answer is never lost - it falls back to the normal text delivery below.
-                            out = await self._tts(reply)
+                            if left is not None and left < 4:
+                                out = None
+                                print("voice_mode tts skipped: low budget")
+                            else:
+                                out = await self._tts(reply)
                             print("voice_mode tts ok", out is not None)
                             if out is not None and await self._send_tts_out(chat_id, out):
                                 return 200, {}

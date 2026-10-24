@@ -259,6 +259,26 @@ def test_voice_mode_off_no_audio(app):
     assert any("sendMessage" in u for m, u, k in app.http.calls)
 
 
+def test_voice_mode_low_budget_skips_tts_but_keeps_text(app):
+    import time as _t
+    _fake_tts_wav(app)
+    run(app._tg_process("ok", "/voice on", 42))
+    app._job_start = _t.monotonic() - (app.BUDGET_S - 1)  # only ~1s of job budget left
+    run(app._tg_process("ok", "hi", 42))
+    msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
+    assert "pong" in msgs and any("Awaaz nahi ban payi" in t for t in msgs)  # answer delivered as text, honest note
+    assert not [k for m, u, k in app.http.calls if m == "FILE"]  # no doomed TTS attempt burned the last second
+
+
+def test_clamped_timeout_only_inside_job(app):
+    import time as _t
+    assert app._clamped_timeout(9) == 9  # outside a job: unchanged default
+    app._job_start = _t.monotonic()
+    assert 2.0 <= app._clamped_timeout(9) <= 9
+    app._job_start = _t.monotonic() - app.BUDGET_S
+    assert app._clamped_timeout(9) is None  # budget spent: caller skips the call
+
+
 def test_voice_note_answer_spoken_in_mode(app):
     pcm = _fake_tts_wav(app)
     app.core_bound = True
