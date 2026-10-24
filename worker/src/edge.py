@@ -504,8 +504,11 @@ class App:
                      "note": "Single use; connect within 1 minute of mint. Audio flows directly between the app and Google, never through this backend."}
 
     async def _tg_send(self, chat_id, text):
-        return await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
-                                    json={"chat_id": chat_id, "text": text[:4000]}, timeout=self._clamped_timeout(6) or 6)
+        r = await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
+                                 json={"chat_id": chat_id, "text": text[:4000]}, timeout=self._clamped_timeout(6) or 6)
+        if getattr(r, "status_code", 0) >= 400:
+            await self._fail("tg_send", "status " + str(r.status_code))
+        return r
 
     @staticmethod
     def chunks(text, size=3900, max_chunks=10):
@@ -929,14 +932,15 @@ class App:
                     else:
                         out = await self._tts(vt)
                         if not out:
+                            await self._fail("tts", "none " + str(getattr(self, "last_gemini_status", "?")))
                             await self._tg_send(chat_id, "Could not generate the audio right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + ").")
                         elif not await self._send_tts_out(chat_id, out):
                             await self._tg_send(chat_id, "Audio could not be sent.")
                 elif low.startswith("/image"):
                     raw = text[6:].strip()
                     rawlow = raw.lower()
-                    if rawlow in ("on", "off", "status"):
-                        on = (rawlow == "on")
+                    if rawlow in ("", "on", "off", "status"):
+                        on = (rawlow in ("", "on"))  # plain /image enters persistent image mode
                         if rawlow == "status":
                             cur = await self.state.image_mode_get()
                             await self._tg_send(chat_id, "Image mode " + ("ON - photo bhejo to main usse edit karung" + "i" + ", text se tasveer banayengi. Band karne ke liye /image off." if cur else "OFF - photos par edit nahi hota. Chalu karne ke liye /image on."))
@@ -949,7 +953,7 @@ class App:
                     else:
                         ip = raw
                         if not ip or len(ip) > 400:
-                            await self._tg_send(chat_id, "Usage: /image <what to draw> (up to 400 characters), /image on ya /image off image mode ke liye.")
+                            await self._tg_send(chat_id, "Usage: /image <what to draw> (up to 400 characters). Sirf /image bhejne se image mode ON hota hai, /image off se band.")
                         elif getattr(self, "ai", None) is None:
                             await self._tg_send(chat_id, "Image generation is not set up on this server.")
                         else:
@@ -1032,6 +1036,7 @@ class App:
                         if r.status_code >= 400:
                             await self._tg_send(chat_id, "Reply could not be delivered in full. Please try again.")
                     else:
+                        await self._fail("chat_model", "none " + str(getattr(self, "last_gemini_status", "?")))
                         await self._tg_send(chat_id, "Maya could not get an answer from the AI right now (error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again.")
         except Exception as ex:
             print("telegram handler error", type(ex).__name__, str(ex).replace(self.tg_token, "<token>")[:300])

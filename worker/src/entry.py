@@ -267,8 +267,10 @@ class _AI:
                 form = FormData.new()
                 form.append("prompt", prompt)
                 if image_bytes:
+                    # Official contract (Cloudflare changelog 2026-01-15, fetched 2026-10-24):
+                    # input images are input_image_0..input_image_3, each SMALLER THAN 512x512.
                     from js import File
-                    form.append("image", File.new([to_js(bytearray(image_bytes))], "input.jpg"))
+                    form.append("input_image_0", File.new([to_js(bytearray(image_bytes))], "input.jpg"))
                 else:
                     form.append("width", "1024")
                     form.append("height", "1024")

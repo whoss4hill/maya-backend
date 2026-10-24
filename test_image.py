@@ -59,11 +59,22 @@ def test_tg_image_secret_prompt_refused_before_ai(app):
     T.run(app._tg_process("ok", "/image my password is Hunter22abcd", 42))
     assert not app.ai.calls and not files(app)
 
-def test_tg_image_usage_and_video_honest(app):
+def test_tg_image_plain_enables_mode_and_video_honest(app):
     app.tg_token = "T"; app.ai = FakeAI("QUJD")
     T.run(app._tg_process("ok", "/image", 42)); T.run(app._tg_process("ok", "/video a cat", 42))
     t = " ".join(sent_texts(app))
-    assert "Usage: /image" in t and "Video generation is not available" in t and not app.ai.calls
+    assert T.run(app.state.image_mode_get()) is True, "plain /image enters persistent image mode"
+    assert "Image mode ON" in t and "Video generation is not available" in t and not app.ai.calls
+    T.run(app._tg_process("ok", "/image off", 42))
+    assert T.run(app.state.image_mode_get()) is False
+
+
+def test_tg_image_mode_normal_chat_stays_normal(app):
+    app.tg_token = "T"
+    T.run(app.state.image_mode_set(True))
+    T.run(app._tg_process("ok", "aaj mausam kaisa hai?", 42))
+    urls = [u for m, u, k in app.http.calls]
+    assert any("generateContent" in u for u in urls), "normal text must stay a chat answer in image mode"
 
 class TextAI(FakeAI):
     def __init__(self, out): super().__init__(None); self.tout = out

@@ -139,8 +139,11 @@ class Core:
         fails.append({"ts": int(time.time()), "stage": str(stage)[:40], "status": str(status)[:60]})
         del fails[:-self.FAIL_CAP]
 
+    FAIL_TTL_S = 7 * 24 * 3600  # metadata retention bound: entries older than 7 days drop out
+
     def fail_get(self, n: int = 10):
-        return list(self.data.get("fails", []))[-int(n):]
+        cutoff = int(time.time()) - self.FAIL_TTL_S
+        return [f for f in self.data.get("fails", []) if int(f.get("ts", 0)) >= cutoff][-int(n):]
 
     def pair_start(self, now=None, target_id=None):
         return self._pairing().start(now, target_id)
