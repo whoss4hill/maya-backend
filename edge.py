@@ -14,6 +14,15 @@ def _env(k, d=""):
     return os.environ.get(k, d)
 
 
+_LIVE = re.compile(r"\b(train|passenger|express|memu|pnr|platform|running status|live status|flight|bus timing|ticket)\b|\b(ट्रेन)\b", re.I)
+_LIVE_ASK = re.compile(r"\b(dekho|dekh|check|batao|bata|status|time|timing|kab|kitne baje|search|find|dhundh|book)\b", re.I)
+
+
+def _needs_live_lookup(text):
+    t = text or ""
+    return bool(_LIVE.search(t) and _LIVE_ASK.search(t))
+
+
 class App:
     def __init__(self, http=None, state=None):
         self.http = http or Http(timeout=30.0)
@@ -245,8 +254,27 @@ class App:
         print("tg update status", status)
         if not (self.tg_token and isinstance(chat_id, int)):
             return 200, {}
-        await self._tg_process(status, text, chat_id)
+        # Answer Telegram at once: slow model calls must not hold the webhook open (Telegram times out at ~60 s,
+        # reports "Read timeout expired", and the update id is already consumed, so the message would be lost silently).
+        if getattr(self, "defer", None):
+            self.defer(self._tg_guarded(status, text, chat_id))
+        else:
+            await self._tg_guarded(status, text, chat_id)
         return 200, {}
+
+    BUDGET_S = 26  # Workers keep background work alive ~30 s after the response
+
+    async def _tg_guarded(self, status, text, chat_id):
+        try:
+            await asyncio.wait_for(self._tg_process(status, text, chat_id), self.BUDGET_S)
+        except asyncio.TimeoutError:
+            print("tg budget exceeded")
+            try:
+                await self._tg_send(chat_id, "That took too long and I could not finish it. Please send it again in a bit.")
+            except Exception:
+                pass
+        except Exception as ex:
+            print("tg guarded error", type(ex).__name__)
 
     async def _action(self, chat_id, action):
         try:
@@ -352,6 +380,8 @@ class App:
                                     await self._tg_send(chat_id, "Audio could not be sent.")
                 elif low.startswith("/image") or low.startswith("/video"):
                     await self._tg_send(chat_id, "Image and video generation are not enabled yet.")
+                elif _needs_live_lookup(text):
+                    await self._tg_send(chat_id, "Abhi main live train, flight ya website check nahi kar sakti, to schedule ya status nahi bata sakti. Tum IRCTC ya NTES app dekh lo. Live lookup ab tak bana nahi hai.")
                 elif low.startswith("/mail") or low.startswith("/gh"):
                     await self._tg_send(chat_id, self._tool_reply(text))
                 else:
