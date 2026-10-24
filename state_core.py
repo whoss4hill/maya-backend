@@ -42,8 +42,8 @@ class Core:
         self.data["tg"]["owner_enabled"] = bool(on)
         self._audit({"event": "toggle", "on": bool(on)})
 
-    def pair_start(self, now=None):
-        return self._pairing().start(now)
+    def pair_start(self, now=None, target_id=None):
+        return self._pairing().start(now, target_id)
 
     def revoke(self):
         self._pairing().revoke()
