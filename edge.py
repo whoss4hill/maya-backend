@@ -20,19 +20,24 @@ _LIVE_ASK = re.compile(r"\b(dekho|dekh|check|batao|bata|status|time|timing|kab|k
 
 _VN_WORD = re.compile(r"\b(vn|v\.n\.?|voice\s*note|voice\s*message|voice|audio)\b", re.I)
 _VN_ASK = re.compile(r"\b(send|bhej\w*|bana\w*|kro|karo|kar\s*do|sun\w*|bol\w*|record)\b", re.I)
-_VN_STRIP = re.compile(r"\b(ak|ek|ik)\s+(vn|voice\s*note|voice\s*message|voice|audio)\b|\b(vn|voice\s*note|voice\s*message|voice|audio)\b|\b(send|bhejo|bhej\s*do|bhej|bana\s*do|banao|bana|kro|karo|kar\s*do)\b|\b(jisme|jismein|jis\s*mein|ki)\b", re.I)
-_VN_TAIL = re.compile(r"\b(bolo|bol\s*do|bolna|bolke|bol\s*ke|keh\s*do|sunao)\s*[.!]*\s*$", re.I)
+_VN_DELIM = re.compile(r"\b(jisme|jismein|jis\s+mein)\b|:")
+_VN_LEAD = re.compile(r"^\s*((ak|ek|ik)\s+)?(vn|voice\s*note|voice\s*message|voice|audio)\b\s*((send|bhejo|bhej\s*do|bhej|bana\s*do|banao|bana|kro|karo|kar\s*do)\b\s*)*", re.I)
+_VN_TAIL = re.compile(r"\s+(bolo|bol\s*do|bolna|bolke|bol\s*ke|keh\s*do)\s*[.!]*\s*$", re.I)
 
 
 def voice_intent(text):
-    """Natural Hinglish/English 'send a VN saying <words>' -> the exact words to speak, else None. The words are kept verbatim."""
-    t = (text or "").strip()
+    """Natural 'send a VN saying <words>' -> the exact words to speak, else None. Only the unambiguous command frame is removed:
+    everything after 'jisme'/':' stays verbatim except one trailing command marker (bolo/bol do...). Without a delimiter only the
+    leading 'vn send kro' words are removed and the rest is kept untouched."""
+    t = (text or "").strip().split("She replied")[0].strip()
     if t.startswith("/") or not (_VN_WORD.search(t) and _VN_ASK.search(t)):
         return None
-    body = t.split("She replied")[0]
-    body = _VN_TAIL.sub("", body).strip()
-    spoken = re.sub(r"\s+", " ", _VN_STRIP.sub(" ", body)).strip(" ,.:;-")
-    spoken = _VN_TAIL.sub("", spoken).strip(" ,.:;-")
+    m = _VN_DELIM.search(t)
+    if m:
+        spoken = _VN_TAIL.sub("", t[m.end():].strip()).strip()
+    else:
+        m2 = _VN_LEAD.match(t)
+        spoken = t[m2.end():].strip() if m2 and m2.end() > 0 else ""
     return spoken if len(spoken) >= 2 else None
 
 
