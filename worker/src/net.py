@@ -86,6 +86,29 @@ class Http:
         r = await self._client.get(url)
         return r.status_code, r.content
 
+    async def post_bytes(self, url, headers=None, json=None, timeout=None):
+        """JSON POST with a raw binary response (e.g. ElevenLabs TTS). Returns (status, bytes)."""
+        headers = dict(headers or {})
+        body = _json.dumps(json) if json is not None else None
+        if body is not None:
+            headers.setdefault("Content-Type", "application/json")
+        if ON_WORKERS:
+            init = {"method": "POST", "headers": headers}
+            if body is not None:
+                init["body"] = body
+            import asyncio as _aio
+
+            async def _go():
+                r = await _js_fetch(url, _to_js(init, dict_converter=_JsObject.fromEntries))
+                buf = await r.arrayBuffer()
+                return int(r.status), bytes(_Uint8Array.new(buf).to_py())
+            return await _aio.wait_for(_go(), timeout or self.timeout)
+        import httpx
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        r = await self._client.post(url, headers=headers, content=body)
+        return r.status_code, r.content
+
     async def get(self, url, **kw):
         return await self._request("GET", url, **kw)
 

@@ -30,7 +30,7 @@ class FakeHttp:
         if "/rest/v1/memories" in url and m == "POST": return Resp(201, json.dumps([{"id": "m1"}]))
         return Resp(200, "[]")
     async def post_file(self, url, fields, filename, data, mime="application/pdf", field="document"):
-        self.calls.append(("FILE", url, {"fields": fields, "filename": filename, "data": data}))
+        self.calls.append(("FILE", url, {"fields": fields, "filename": filename, "data": data, "mime": mime, "field": field}))
         return Resp(200, "{}")
     async def get(self, u, **k): return await self._r("GET", u, **k)
     async def post(self, u, **k): return await self._r("POST", u, **k)
@@ -140,10 +140,59 @@ def test_voice_tts_wraps_pcm_and_sends_audio(app, monkeypatch):
         if "3.8-flash-tts" in u: return Resp(429, "{}")
         return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16; rate=24000; channels=1", "data": base64.b64encode(pcm).decode()}}]}}]}))
     app.http.post = post
-    w = run(app._tts("hello")); assert w[:4] == b"RIFF" and pcm in w
+    w, ext, mime = run(app._tts("hello")); assert w[:4] == b"RIFF" and pcm in w and (ext, mime) == ("wav", "audio/wav")
     run(app._tg_process("ok", "/voice hello", 42))
     f = [k for m, _, k in app.http.calls if m == "FILE" and "sendAudio" in _]
     assert f and f[0]["filename"] == "maya-voice.wav" and f[0]["data"][:4] == b"RIFF"
+
+
+def test_elevenlabs_off_by_default(app):
+    # Without explicit env config the Gemini chain is the only TTS path
+    import base64
+    pcm = b"\x00\x01" * 100
+    async def post(u, **k):
+        return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16; rate=24000; channels=1", "data": base64.b64encode(pcm).decode()}}]}}]}))
+    app.http.post = post
+    async def post_bytes(u, headers=None, json=None, timeout=None):
+        raise AssertionError("elevenlabs must not be called when unconfigured")
+    app.http.post_bytes = post_bytes
+    w, ext, _ = run(app._tts("hello")); assert ext == "wav" and w[:4] == b"RIFF"
+
+
+def test_elevenlabs_ogg_voice_note_when_configured(app, monkeypatch):
+    ogg = b"OggS fake opus payload"
+    monkeypatch.setenv("MAYA_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+    monkeypatch.setenv("MAYA_TTS_ELEVENLABS_VOICE_ID", "voice-1")
+    calls = []
+    async def post_bytes(u, headers=None, json=None, timeout=None):
+        calls.append((u, headers, json))
+        return 200, ogg
+    app.http.post_bytes = post_bytes
+    data, ext, mime = run(app._tts("namaste"))
+    assert (data, ext, mime) == (ogg, "ogg", "audio/ogg")
+    u, headers, body = calls[0]
+    assert "text-to-speech/voice-1" in u and "opus_48000_64" in u
+    assert headers["xi-api-key"] == "test-key" and body["model_id"] == "eleven_multilingual_v2" and body["text"] == "namaste"
+    # /voice command delivers it as a Telegram voice note
+    run(app._tg_process("ok", "/voice hello", 42))
+    f = [k for m, _, k in app.http.calls if m == "FILE" and "sendVoice" in _]
+    assert f and f[0]["filename"] == "maya-voice.ogg" and f[0]["data"] == ogg and f[0]["field"] == "voice"
+
+
+def test_elevenlabs_failure_falls_back_to_gemini(app, monkeypatch):
+    import base64
+    pcm = b"\x00\x01" * 100
+    monkeypatch.setenv("MAYA_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+    monkeypatch.setenv("MAYA_TTS_ELEVENLABS_VOICE_ID", "voice-1")
+    async def post_bytes(u, headers=None, json=None, timeout=None):
+        return 402, b"payment_required"
+    app.http.post_bytes = post_bytes
+    async def post(u, **k):
+        return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "audio/L16; rate=24000; channels=1", "data": base64.b64encode(pcm).decode()}}]}}]}))
+    app.http.post = post
+    w, ext, _ = run(app._tts("hello")); assert ext == "wav" and w[:4] == b"RIFF"
 
 
 def test_chat_history_passed_and_no_intro_rule(app):

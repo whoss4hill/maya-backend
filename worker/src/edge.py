@@ -119,9 +119,38 @@ class App:
 
     TTS_MODELS = ("gemini-3.8-flash-tts", "gemini-3.1-flash-tts-preview")
 
+    async def _tts_elevenlabs(self, text):
+        """Explicitly configured ElevenLabs TTS (owner's own key, premade voice, multilingual v2).
+        Returns (ogg_opus_bytes, "ogg", "audio/ogg") or None on any failure. Active ONLY when
+        MAYA_TTS_PROVIDER=elevenlabs + ELEVENLABS_API_KEY + MAYA_TTS_ELEVENLABS_VOICE_ID are all set;
+        otherwise, or on failure, the Gemini chain below stays the default."""
+        import os as _os
+        if _os.environ.get("MAYA_TTS_PROVIDER", "").strip().lower() != "elevenlabs":
+            return None
+        key = _os.environ.get("ELEVENLABS_API_KEY", "")
+        vid = _os.environ.get("MAYA_TTS_ELEVENLABS_VOICE_ID", "")
+        if not key or not vid:
+            print("elevenlabs tts configured off: missing key or voice id")
+            return None
+        try:
+            status, raw = await self.http.post_bytes(
+                "https://api.elevenlabs.io/v1/text-to-speech/" + vid + "?output_format=opus_48000_64",
+                headers={"xi-api-key": key},
+                json={"text": str(text)[:1500], "model_id": "eleven_multilingual_v2"})
+            print("elevenlabs tts status", status)
+            if status == 200 and raw:
+                return raw, "ogg", "audio/ogg"
+        except Exception as ex:
+            print("elevenlabs tts error", type(ex).__name__)
+        return None
+
     async def _tts(self, text):
-        """Free-tier Gemini TTS -> WAV bytes (None on failure). Output is a WAV file, not an OGG/Opus voice note."""
+        """Returns (audio_bytes, ext, mime) or None. ElevenLabs only when explicitly configured;
+        default is the free-tier Gemini TTS chain -> WAV. Output file format depends on the provider used."""
         import base64, io, wave
+        el = await self._tts_elevenlabs(text)
+        if el is not None:
+            return el
         for model in self.TTS_MODELS:
             r = await self.http.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -136,7 +165,7 @@ class App:
                 inl = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
                 raw = base64.b64decode(inl["data"])
                 if raw[:4] == b"RIFF":
-                    return raw
+                    return raw, "wav", "audio/wav"
                 rate = 24000
                 for part in inl.get("mimeType", "").split(";"):
                     if part.strip().startswith("rate="):
@@ -144,7 +173,7 @@ class App:
                 buf = io.BytesIO()
                 with wave.open(buf, "wb") as w:
                     w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(raw)
-                return buf.getvalue()
+                return buf.getvalue(), "wav", "audio/wav"
             except Exception as ex:
                 print("tts parse error", type(ex).__name__)
         return None
@@ -697,19 +726,27 @@ class App:
                     elif len(vt) > 1500:
                         await self._tg_send(chat_id, "Text is too long for one voice clip (max 1500 characters).")
                     else:
-                        wav = await self._tts(vt)
-                        if not wav:
+                        out = await self._tts(vt)
+                        if not out:
                             await self._tg_send(chat_id, "Could not generate the audio right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + ").")
                         else:
-                            r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendAudio",
-                                                          {"chat_id": chat_id, "title": "Maya voice"}, "maya-voice.wav", wav, mime="audio/wav", field="audio")
-                            print("tg_sendAudio status", r.status_code)
-                            if r.status_code >= 400:
-                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
-                                                              {"chat_id": chat_id}, "maya-voice.wav", wav, mime="audio/wav")
-                                print("tg_sendDocument(wav) status", r.status_code)
+                            data, ext, mime = out
+                            if ext == "ogg":  # ElevenLabs Opus: a real Telegram voice note
+                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendVoice",
+                                                              {"chat_id": chat_id}, "maya-voice.ogg", data, mime=mime, field="voice")
+                                print("tg_sendVoice status", r.status_code)
                                 if r.status_code >= 400:
                                     await self._tg_send(chat_id, "Audio could not be sent.")
+                            else:
+                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendAudio",
+                                                              {"chat_id": chat_id, "title": "Maya voice"}, "maya-voice." + ext, data, mime=mime, field="audio")
+                                print("tg_sendAudio status", r.status_code)
+                                if r.status_code >= 400:
+                                    r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                                                  {"chat_id": chat_id}, "maya-voice." + ext, data, mime=mime)
+                                    print("tg_sendDocument status", r.status_code)
+                                    if r.status_code >= 400:
+                                        await self._tg_send(chat_id, "Audio could not be sent.")
                 elif low.startswith("/image") or (image_intent(text) is not None and getattr(self, "ai", None) is not None):
                     ip = text[6:].strip() if low.startswith("/image") else image_intent(text)
                     if not ip or len(ip) > 400:
