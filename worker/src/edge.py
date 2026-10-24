@@ -387,9 +387,12 @@ class App:
         if path == "/v1/settings/model" and method in ("GET", "POST"):
             if method == "POST":
                 v = data.get("model") if isinstance(data, dict) else None
-                if v not in ("auto", "backup_only"):
+                if v not in ("auto", "backup_only") and v not in WORKER_MODELS and v not in OPENROUTER_MODELS and v not in GROQ_MODELS:
                     return self.err(422, "invalid_model")
-                await self.state.model_pref_set(v)
+                try:
+                    await self.state.model_pref_set(v)
+                except Exception:
+                    return self.err(422, "invalid_model")
             return 200, {"model": await self.state.model_pref_get(),
                          "options": ["auto", "backup_only"] + list(WORKER_MODELS) + list(OPENROUTER_MODELS) + list(GROQ_MODELS),
                          "labels": {"auto": "Maya chooses (Gemini first, backup if busy)", "backup_only": "Backup model only", **WORKER_MODELS, **OPENROUTER_MODELS, **GROQ_MODELS}}

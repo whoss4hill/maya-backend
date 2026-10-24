@@ -82,3 +82,14 @@ def test_auth_runs_before_limit(app):
     assert s == 401
     s, b = run(app.handle("GET", "/v1/settings/model", A, None))
     assert s == 200
+
+def test_settings_model_accepts_registry_models(app):
+    # the advertised options must actually be settable (regression: POST only accepted auto/backup_only)
+    s, b = run(app.handle("POST", "/v1/settings/model", A, json.dumps({"model": "groq/openai/gpt-oss-20b"})))
+    assert s == 200 and b["model"] == "groq/openai/gpt-oss-20b"
+    s, b = run(app.handle("POST", "/v1/settings/model", A, json.dumps({"model": "openrouter/nvidia/nemotron-3.5-super-vl:free"})))
+    assert s == 200 and b["model"] == "openrouter/nvidia/nemotron-3.5-super-vl:free"
+    s, b = run(app.handle("POST", "/v1/settings/model", A, json.dumps({"model": "gpt-4-evil"})))
+    assert s == 422 and b["error"] == "invalid_model"
+    s, b = run(app.handle("POST", "/v1/settings/model", A, json.dumps({"model": "auto"})))
+    assert s == 200 and b["model"] == "auto"
