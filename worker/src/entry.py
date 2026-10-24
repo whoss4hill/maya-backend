@@ -54,6 +54,14 @@ class MayaState(DurableObject):
         raw = await self.ctx.storage.get("hist")
         return raw if raw else "[]"
 
+    async def job_set(self, state, note=""):
+        import time as _t
+        await self.ctx.storage.put("job", json.dumps({"state": state, "note": note, "ts": _t.time()}))
+
+    async def job_get(self):
+        raw = await self.ctx.storage.get("job")
+        return raw if raw else "{}"
+
     # ---- phone socket: one authenticated owner socket, event push (no polling), no offline queue ----
     async def fetch(self, request):
         from js import WebSocketPair
@@ -139,6 +147,12 @@ class DOState:
 
     async def history(self):
         return json.loads(await self.stub.history())
+
+    async def job_set(self, state, note=""):
+        await self.stub.job_set(state, note)
+
+    async def job_get(self):
+        return json.loads(await self.stub.job_get())
 
     async def push_command(self, cmd):
         return await self.stub.push_command(json.dumps(cmd))
