@@ -224,17 +224,32 @@ def test_voice_mode_commands(app):
     assert any("Voice mode OFF" in t for t in msgs)
 
 
-def test_voice_mode_speaks_answers(app):
+def test_voice_mode_speaks_answers_voice_only(app):
     pcm = _fake_tts_wav(app)
     run(app._tg_process("ok", "/voice on", 42))
     n0 = len(app.http.calls)
     run(app._tg_process("ok", "hi", 42))
     new = app.http.calls[n0:]
-    assert any("sendMessage" in u and k["json"]["text"] == "pong" for m, u, k in new)  # text answer still sent
+    assert not any("sendMessage" in u and k["json"]["text"] == "pong" for m, u, k in new)  # NO duplicate text in voice mode
     f = [k for m, u, k in new if m == "FILE" and "sendAudio" in u]
     assert f and f[0]["data"][:4] == b"RIFF" and pcm in f[0]["data"]  # the ANSWER is spoken, not the input "hi"
     tts = [k["json"] for m, u, k in new if "generateContent" in u and "speechConfig" in json.dumps(k.get("json", {}))]
     assert tts and tts[0]["contents"][0]["parts"][0]["text"] == "pong"
+
+
+def test_voice_mode_tts_failure_falls_back_to_text(app):
+    run(app._tg_process("ok", "/voice on", 42))
+    async def post(u, **k):
+        app.http.calls.append(("POST", u, k))
+        if "generateContent" in u and "speechConfig" in json.dumps(k.get("json", {})):
+            return Resp(429, "{}")  # both TTS models fail
+        return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
+    app.http.post = post
+    run(app._tg_process("ok", "hi", 42))
+    msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
+    assert "pong" in msgs  # answer never silently lost
+    assert any("Awaaz nahi ban payi" in t for t in msgs)  # honest fallback note
+    assert not [k for m, u, k in app.http.calls if m == "FILE"]
 
 
 def test_voice_mode_off_no_audio(app):
@@ -267,9 +282,12 @@ def test_voice_note_answer_spoken_in_mode(app):
         return Resp(200, "[]")
     app.http.get = get
     run(app._tg_process("ok", "/voice on", 42))
+    n0 = len(app.http.calls)
     run(app._tg_process("voice", json.dumps({"file_id": "f1", "duration": 3, "size": 1000, "mime": "audio/ogg"}), 42))
-    f = [k for m, u, k in app.http.calls if m == "FILE" and "sendAudio" in u]
+    new = app.http.calls[n0:]
+    f = [k for m, u, k in new if m == "FILE" and "sendAudio" in u]
     assert f and f[0]["data"][:4] == b"RIFF"  # understood via STT, answer spoken in mode
+    assert not any("sendMessage" in u and k["json"]["text"] == "pong" for m, u, k in new)  # voice-only, no text copy
 
 
 def test_chat_history_passed_and_no_intro_rule(app):

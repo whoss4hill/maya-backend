@@ -754,12 +754,12 @@ class App:
                         set_fn = getattr(self.state, "voice_mode_set", None)
                         if ctl == "status" or set_fn is None:
                             on = await self._voice_mode_on()
-                            await self._tg_send(chat_id, "Voice mode " + ("ON hai. Har jawab awaaz me bhi jata hai." if on else "OFF hai.") + " Chalu: /voice on, band: /voice off, ya kisi exact text ko bolwane ke liye /voice <text>.")
+                            await self._tg_send(chat_id, "Voice mode " + ("ON hai. Har jawab sirf awaaz me jata hai." if on else "OFF hai.") + " Chalu: /voice on, band: /voice off, ya kisi exact text ko bolwane ke liye /voice <text>.")
                         else:
                             on = ctl != "off"
                             await set_fn(on)
                             if on:
-                                await self._tg_send(chat_id, "Voice mode ON. Ab jo bhi bhejoge - text ya voice note - main samajhkar jawab dungi aur woh jawab awaaz me bhi sunai dega (text ke saath). Band karne ke liye /voice off.")
+                                await self._tg_send(chat_id, "Voice mode ON. Ab jo bhi bhejoge - text ya voice note - main samajhkar jawab dungi aur woh sirf awaaz me sunai dega. Band karne ke liye /voice off.")
                             else:
                                 await self._tg_send(chat_id, "Voice mode OFF. Ab jawab sirf text me jayenge.")
                     elif len(vt) > 1500:
@@ -813,15 +813,18 @@ class App:
                                 await self.state.add_turn(text, reply)
                         except Exception as ex:
                             print("history write error", type(ex).__name__)
+                        if await self._voice_mode_on() and len(reply) <= 1500:
+                            # Voice mode: the answer is SPOKEN, not duplicated as text. If TTS or the audio send fails,
+                            # the answer is never lost - it falls back to the normal text delivery below.
+                            out = await self._tts(reply)
+                            print("voice_mode tts ok", out is not None)
+                            if out is not None and await self._send_tts_out(chat_id, out):
+                                return 200, {}
+                            await self._tg_send(chat_id, "(Awaaz nahi ban payi, jawab text me:)")
                         r = await self._tg_send_long(chat_id, reply)
                         print("tg sendMessage status", r.status_code, "chunks", len(self.chunks(reply)))
                         if r.status_code >= 400:
                             await self._tg_send(chat_id, "Reply could not be delivered in full. Please try again.")
-                        elif await self._voice_mode_on():
-                            out = await self._tts(reply[:1500])
-                            print("voice_mode tts ok", out is not None)
-                            if out is not None:
-                                await self._send_tts_out(chat_id, out)
                     else:
                         await self._tg_send(chat_id, "Maya could not get an answer from the AI right now (error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again.")
         except Exception as ex:
