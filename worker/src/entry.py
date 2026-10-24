@@ -171,6 +171,8 @@ class Default(WorkerEntrypoint):
             return Response(json.dumps({"ok": True, "service": "maya-backend-edge"}), headers={"content-type": "application/json"})
         stub = self.env.MAYA_STATE.get(self.env.MAYA_STATE.idFromName("maya"))
         app = App(http=Http(), state=DOState(stub))
+        import asyncio as _a
+        app.defer = lambda coro: self.ctx.waitUntil(_a.ensure_future(coro))
         if path == "/v1/phone/ws":
             if str(request.headers.get("upgrade") or "").lower() != "websocket":
                 return Response("expected websocket", status=426)
