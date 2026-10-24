@@ -154,3 +154,25 @@ def test_auto_label_unchanged(app):
         async def text(self, p): return "x"
     app.ai = AI()
     assert "because the main one was unavailable" in T.run(app._backup_text("q"))
+
+
+def _with_ai(app):
+    class AI:
+        async def text(self, p): return "x"
+        async def image(self, p): return None
+    app.ai = AI()
+
+def test_chat_image_hint_only_for_optin_header(app):
+    _with_ai(app)
+    msg = json.dumps({"message": "ek billi ki tasveer bana do"})
+    h = dict(T.A); h["x-maya-media"] = "1"
+    s, b = T.run(app.handle("POST", "/v1/chat", h, msg))
+    assert s == 200 and b.get("image_prompt") and set(b) == {"reply", "image_prompt"}
+    s, b = T.run(app.handle("POST", "/v1/chat", T.A, msg))
+    assert s == 200 and "image_prompt" not in b
+
+def test_optin_header_ordinary_chat_unchanged(app):
+    _with_ai(app)
+    h = dict(T.A); h["x-maya-media"] = "1"
+    s, b = T.run(app.handle("POST", "/v1/chat", h, json.dumps({"message": "kal ka plan batao"})))
+    assert s == 200 and "image_prompt" not in b
