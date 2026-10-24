@@ -198,6 +198,8 @@ class App:
     # ---- router
     async def handle(self, method, path, headers, body):
         headers = {k.lower(): v for k, v in (headers or {}).items()}
+        if body and len(body) > 32000 and path.startswith("/v1/"):
+            return self.err(413, "payload_too_large")
         try:
             data = json.loads(body) if body else {}
         except Exception:
