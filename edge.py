@@ -164,7 +164,18 @@ class App:
                     return "..."
             if r.status_code not in (429, 404, 500, 503):
                 break
-        return None
+        return await self._backup_text(prompt)
+
+    async def _backup_text(self, prompt):
+        """Same-account Cloudflare Workers AI fallback (Free allocation only; the platform refuses past it)."""
+        ai = getattr(self, "ai", None)
+        if ai is None or not hasattr(ai, "text"):
+            return None
+        out = await ai.text(str(prompt)[:6000])
+        if not out:
+            return None
+        self.used_backup = True
+        return out.strip() + "\n\n(Backup AI model answered because the main one was unavailable.)"
 
     # ---- router
     async def handle(self, method, path, headers, body):
@@ -467,8 +478,30 @@ class App:
                                 print("tg_sendDocument(wav) status", r.status_code)
                                 if r.status_code >= 400:
                                     await self._tg_send(chat_id, "Audio could not be sent.")
-                elif low.startswith("/image") or low.startswith("/video"):
-                    await self._tg_send(chat_id, "Image and video generation are not enabled yet.")
+                elif low.startswith("/image"):
+                    ip = text[6:].strip()
+                    if not ip or len(ip) > 400:
+                        await self._tg_send(chat_id, "Usage: /image <what to draw> (up to 400 characters).")
+                    elif getattr(self, "ai", None) is None:
+                        await self._tg_send(chat_id, "Image generation is not set up on this server.")
+                    else:
+                        b64 = await self.ai.image(ip)
+                        if not b64:
+                            await self._tg_send(chat_id, "I could not make the image right now. The free daily image allowance may be used up or the service is busy. Nothing was charged. Please try again later.")
+                        else:
+                            import base64
+                            jpg = base64.b64decode(b64)
+                            r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendPhoto",
+                                                          {"chat_id": chat_id, "caption": ip[:200]}, "maya-image.jpg", jpg, mime="image/jpeg", field="photo")
+                            print("tg_sendPhoto status", r.status_code)
+                            if r.status_code >= 400:
+                                r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                                              {"chat_id": chat_id, "caption": ip[:200]}, "maya-image.jpg", jpg, mime="image/jpeg")
+                                print("tg_sendDocument(jpg) status", r.status_code)
+                                if r.status_code >= 400:
+                                    await self._tg_send(chat_id, "The image was made but could not be sent.")
+                elif low.startswith("/video"):
+                    await self._tg_send(chat_id, "Video generation is not available. No free video option is set up.")
                 elif _needs_live_lookup(text):
                     await self._tg_send(chat_id, "Abhi main live train, flight ya website check nahi kar sakti, to schedule ya status nahi bata sakti. Tum IRCTC ya NTES app dekh lo. Live lookup ab tak bana nahi hai.")
                 elif low.startswith("/mail") or low.startswith("/gh"):
