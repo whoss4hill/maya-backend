@@ -6,7 +6,7 @@ import re
 import asyncio, json, os, re, time
 
 from net import Http
-import gmail_tools, github_tools
+import gmail_tools, github_tools, secret_guard
 from pdfgen import make_pdf, unsupported_chars, UnsupportedText
 
 
@@ -209,6 +209,8 @@ class App:
             msg = str(data.get("message") or "").strip()
             if not msg:
                 return self.err(400, "message_required")
+            if secret_guard.looks_like_secret(msg):
+                return 200, {"reply": secret_guard.NOTICE}  # not stored, not sent to the model
             r = await self.http.get(f"{rest}/memories", headers=sb, params={
                 "select": "kind,content", "user_id": f"eq.{uid}", "order": "last_used_at.desc.nullslast", "limit": "20"})
             mem = r.json() if r.status_code == 200 else []
@@ -231,6 +233,8 @@ class App:
             kind, content = data.get("kind"), data.get("content")
             if not kind or not content:
                 return self.err(400, "kind_and_content_required")
+            if secret_guard.looks_like_secret(str(content)):
+                return self.err(422, "secret_detected")
             r = await self.http.post(f"{rest}/memories", headers={**sb, "Content-Type": "application/json", "Prefer": "return=representation"},
                                      params={"select": "id"}, json={"user_id": uid, "kind": kind, "content": content, "source": data.get("source") or "chat"})
             return (201, {"id": r.json()[0]["id"]}) if r.status_code < 400 else self.err(500, "internal_error")
@@ -396,6 +400,8 @@ class App:
         try:
             if status == "paired":
                 await self._tg_send(chat_id, "Paired. Maya is now connected to this chat only.")
+            elif status == "ok" and text and secret_guard.looks_like_secret(text):
+                await self._tg_send(chat_id, secret_guard.NOTICE + " You may also delete that message from this chat.")
             elif status == "ok" and text:
                 low = text.lower()
                 if low.startswith("/pdf"):
