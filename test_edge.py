@@ -14,7 +14,7 @@ class St:
     async def revoke(self): self.core.revoke()
     async def bound(self): return self.core.bound_id
     job = {}
-    async def job_set(self, s, n=""): self.job = {"state": s, "note": n, "ts": time.time()}
+    async def job_set(self, s, n="", alarm_s=0): self.job = {"state": s, "note": n, "ts": time.time()}
     async def job_get(self): return self.job
     async def status(self): return {"bound": self.core.bound_id is not None, "enabled": self.core.data["tg"]["owner_enabled"], "bound_suffix": None}
 
