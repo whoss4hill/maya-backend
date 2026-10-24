@@ -12,6 +12,8 @@ class St:
     async def pair_start(self, target_id=None): return self.core.pair_start(target_id=target_id)
     async def set_enabled(self, on): self.core.set_enabled(on)
     async def revoke(self): self.core.revoke()
+    async def model_pref_get(self): return self.core.model_pref
+    async def model_pref_set(self, v): self.core.set_model_pref(v)
     async def bound(self): return self.core.bound_id
     job = {}
     async def job_set(self, s, n="", alarm_s=0): self.job = {"state": s, "note": n, "ts": time.time()}
