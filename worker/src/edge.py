@@ -206,10 +206,14 @@ class App:
         r = None
         for model in models:
             for attempt in range(2):
+                to = self._clamped_timeout(9)
+                if to is None:
+                    print("gemini skipped: job budget spent")
+                    return None
                 try:
                     r = await self.http.post(
                         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                        headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt, history), timeout=9)
+                        headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt, history), timeout=to)
                 except Exception as ex:
                     print("gemini", model, "call failed", type(ex).__name__)
                     self.last_gemini_status = "timeout"
@@ -455,7 +459,7 @@ class App:
 
     async def _tg_send(self, chat_id, text):
         return await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
-                                    json={"chat_id": chat_id, "text": text[:4000]})
+                                    json={"chat_id": chat_id, "text": text[:4000]}, timeout=self._clamped_timeout(6) or 6)
 
     @staticmethod
     def chunks(text, size=3900, max_chunks=10):
@@ -499,6 +503,7 @@ class App:
         return 200, {}
 
     BUDGET_S = 24  # Workers keep background work alive ~30 s after the response
+    PROCESS_BUDGET_S = 21  # stages stop here; the last ~3 s are reserved for delivering the answer
 
     async def _job(self, state, status="", text="", alarm_s=0):
         """Durable job record in the Durable Object: processing -> done | error | timeout (never silent loss)."""
@@ -510,6 +515,7 @@ class App:
 
     async def _tg_guarded(self, status, text, chat_id):
         self._job_start = time.monotonic()
+        self._pending = None
         try:
             await asyncio.wait_for(self._tg_process(status, text, chat_id), self.BUDGET_S)
             await self._job("done")
@@ -517,10 +523,22 @@ class App:
         except asyncio.TimeoutError:
             await self._job("timeout")
             print("tg budget exceeded")
-            try:
-                await self._tg_send(chat_id, "That took too long and I could not finish it. Please send it again in a bit.")
-            except Exception:
-                pass
+            # If the answer was already generated but the voice send ate the budget, deliver it as text now
+            # (reserved seconds after the guard) instead of losing it. Marker is cleared before sending: no duplicates.
+            pend, self._pending = self._pending, None
+            delivered = False
+            if pend:
+                try:
+                    r = await self._tg_send_long(chat_id, pend)
+                    delivered = r is not None and r.status_code < 400
+                    print("timeout recovery send", r.status_code if r else "?")
+                except Exception as ex:
+                    print("timeout recovery error", type(ex).__name__)
+            if not delivered:
+                try:
+                    await self._tg_send(chat_id, "That took too long and I could not finish it. Please send it again in a bit.")
+                except Exception:
+                    pass
         except Exception as ex:
             await self._job("error")
             print("tg guarded error", type(ex).__name__)
@@ -580,7 +598,7 @@ class App:
             await self._tg_send(chat_id, "I could not read that audio format. A normal voice note works best - or just type it.")
             return
         try:
-            r = await self.http.get(f"https://api.telegram.org/bot{self.tg_token}/getFile", params={"file_id": fid})
+            r = await self.http.get(f"https://api.telegram.org/bot{self.tg_token}/getFile", params={"file_id": fid}, timeout=self._clamped_timeout(6) or 6)
             fp = (r.json().get("result") or {}).get("file_path") if r.status_code == 200 else None
         except Exception as ex:
             fp = None
@@ -589,7 +607,7 @@ class App:
             await self._tg_send(chat_id, "I could not download that voice note - please send it again or type it.")
             return
         try:
-            st, data = await self.http.get_bytes(f"https://api.telegram.org/file/bot{self.tg_token}/{fp}")
+            st, data = await self.http.get_bytes(f"https://api.telegram.org/file/bot{self.tg_token}/{fp}", timeout=self._clamped_timeout(10) or 10)
             if st != 200:
                 data = b""
         except Exception as ex:
@@ -668,7 +686,7 @@ class App:
     def _left(self):
         """Seconds of wall budget left in this webhook job, or None outside a guarded job."""
         start = getattr(self, "_job_start", None)
-        return None if start is None else max(0.0, self.BUDGET_S - (time.monotonic() - start))
+        return None if start is None else max(0.0, self.PROCESS_BUDGET_S - (time.monotonic() - start))
 
     def _clamped_timeout(self, default):
         """Per-call timeout capped by the remaining job budget; None = no usable time, skip the call."""
@@ -839,6 +857,7 @@ class App:
                         if await self._voice_mode_on() and len(reply) <= 1500:
                             # Voice mode: the answer is SPOKEN, not duplicated as text. If TTS or the audio send fails,
                             # the answer is never lost - it falls back to the normal text delivery below.
+                            self._pending = reply  # recoverable as text if TTS/audio outlives the job guard
                             if left is not None and left < 4:
                                 out = None
                                 print("voice_mode tts skipped: low budget")
@@ -846,6 +865,7 @@ class App:
                                 out = await self._tts(reply)
                             print("voice_mode tts ok", out is not None)
                             if out is not None and await self._send_tts_out(chat_id, out):
+                                self._pending = None
                                 return 200, {}
                             await self._tg_send(chat_id, "(Awaaz nahi ban payi, jawab text me:)")
                         r = await self._tg_send_long(chat_id, reply)

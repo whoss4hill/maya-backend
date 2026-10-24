@@ -259,15 +259,57 @@ def test_voice_mode_off_no_audio(app):
     assert any("sendMessage" in u for m, u, k in app.http.calls)
 
 
-def test_voice_mode_low_budget_skips_tts_but_keeps_text(app):
+def test_voice_mode_low_budget_refuses_cleanly_no_doomed_calls(app):
     import time as _t
     _fake_tts_wav(app)
     run(app._tg_process("ok", "/voice on", 42))
-    app._job_start = _t.monotonic() - (app.BUDGET_S - 1)  # only ~1s of job budget left
+    app._job_start = _t.monotonic() - (app.PROCESS_BUDGET_S - 2)  # <3s stage budget: calls refuse instead of dying mid-flight
     run(app._tg_process("ok", "hi", 42))
     msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
-    assert "pong" in msgs and any("Awaaz nahi ban payi" in t for t in msgs)  # answer delivered as text, honest note
-    assert not [k for m, u, k in app.http.calls if m == "FILE"]  # no doomed TTS attempt burned the last second
+    assert any("could not get an answer" in t for t in msgs)  # honest failure, not a silent loss
+    assert not [k for m, u, k in app.http.calls if m == "FILE"]  # no doomed TTS/upload attempt
+
+
+def test_outer_guard_recovers_generated_answer_as_text(app):
+    """Actual-deadline semantics (scaled): the answer WAS generated, the voice send outlives the guard,
+    the timeout branch delivers the answer as text - once, no resend message, no duplicate."""
+    import time as _t
+    run(app._tg_process("ok", "/voice on", 42))
+    async def post(u, **k):
+        app.http.calls.append(("POST", u, k))
+        body = json.dumps(k.get("json", {}))
+        if "speechConfig" in body:
+            await asyncio.sleep(30)  # TTS hangs - outlives the job guard
+            return Resp(200, "{}")
+        return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
+    app.http.post = post
+    app.BUDGET_S = 0.5  # scale the real guard down; PROCESS_BUDGET stays, so stages may start
+    try:
+        run(app._tg_guarded("ok", "hi", 42))
+    finally:
+        app.BUDGET_S = 24
+    msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
+    assert msgs.count("pong") == 1  # the generated answer was recovered and delivered as text, exactly once
+    assert not any("took too long" in t for t in msgs)  # no loss message when the answer actually landed
+    assert not [k for m, u, k in app.http.calls if m == "FILE"]  # the hung audio send was cancelled
+
+
+def test_outer_guard_timeout_without_answer_sends_resend(app):
+    """Nothing generated yet (chat stage hangs): the honest resend message is the only possible outcome."""
+    async def post(u, **k):
+        app.http.calls.append(("POST", u, k))
+        if "generateContent" in u:
+            await asyncio.sleep(30)
+            return Resp(200, "{}")
+        return Resp(200, "{}")
+    app.http.post = post
+    app.BUDGET_S = 0.5
+    try:
+        run(app._tg_guarded("ok", "hi", 42))
+    finally:
+        app.BUDGET_S = 24
+    msgs = [k["json"]["text"] for m, u, k in app.http.calls if "sendMessage" in u]
+    assert any("took too long" in t for t in msgs) and "pong" not in msgs
 
 
 def test_clamped_timeout_only_inside_job(app):
