@@ -1,3 +1,4 @@
+import asyncio
 import os, json, asyncio, time, pytest
 from net import Resp
 from state_core import Core
@@ -12,6 +13,9 @@ class St:
     async def set_enabled(self, on): self.core.set_enabled(on)
     async def revoke(self): self.core.revoke()
     async def bound(self): return self.core.bound_id
+    job = {}
+    async def job_set(self, s, n=""): self.job = {"state": s, "note": n, "ts": time.time()}
+    async def job_get(self): return self.job
     async def status(self): return {"bound": self.core.bound_id is not None, "enabled": self.core.data["tg"]["owner_enabled"], "bound_suffix": None}
 
 class FakeHttp:
@@ -188,3 +192,24 @@ def test_webhook_defers_processing_and_returns_fast(app):
     assert st[0] == 200 and len(app.http.calls) == n and len(jobs) == 1
     run(jobs[0])
     assert any("generateContent" in u for _, u, _ in app.http.calls)
+
+
+def test_job_state_done_timeout_and_stale_ack(app):
+    run(app._tg_guarded("ok", "hello", 42)); run(app._job("done"))
+    assert app.state.job["state"] == "done"
+    async def slow(*a, **k): await asyncio.sleep(1)
+    app._tg_process = slow; app.BUDGET_S = 0.05
+    run(app._tg_guarded("ok", "hello", 42))
+    assert app.state.job["state"] == "timeout"
+    assert "took too long" in [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u][-1]
+
+def test_gemini_call_exception_falls_to_next_model(app):
+    calls = []
+    orig = app.http.post
+    async def post(url, **k):
+        calls.append(url)
+        if len(calls) == 1: raise asyncio.TimeoutError()
+        return await orig(url, **k)
+    app.http.post = post
+    out = run(app._gemini("hi"))
+    assert len(calls) >= 2 and out
