@@ -138,3 +138,19 @@ def test_backup_only_skips_gemini(app):
 def test_settings_model_needs_owner(app):
     s, b = T.run(app.handle("GET", "/v1/settings/model", {}, ""))
     assert s in (401, 403)
+
+
+def test_backup_only_label_does_not_claim_unavailable(app):
+    class AI:
+        async def text(self, p): return "hello there"
+    app.ai = AI()
+    T.run(app.handle("POST", "/v1/settings/model", T.A, json.dumps({"model": "backup_only"})))
+    s, b = T.run(app.handle("POST", "/v1/chat", T.A, json.dumps({"message": "hi"})))
+    r = b["reply"]
+    assert "as selected in settings" in r and "unavailable" not in r
+
+def test_auto_label_unchanged(app):
+    class AI:
+        async def text(self, p): return "x"
+    app.ai = AI()
+    assert "because the main one was unavailable" in T.run(app._backup_text("q"))
