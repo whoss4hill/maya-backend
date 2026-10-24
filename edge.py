@@ -41,6 +41,21 @@ def voice_intent(text):
     return spoken if len(spoken) >= 2 else None
 
 
+_IMG_VERB = re.compile(r"(?i)\b(?:bana(?:o|do|ke|na)?|banaye|generate|create|make|draw|paint|design|dikha(?:o|do)? ?ek)\b")
+_IMG_NOUN = re.compile(r"(?i)\b(?:image|images|picture|pic|tasveer|tasvir|drawing|illustration|artwork)\b")
+_IMG_NOT = re.compile(r"(?i)\b(?:send|forward|share|find|search|open|delete|show me my|my (?:photos|pictures|images)|gallery|screenshot|photo of me|edit (?:this|my))\b")
+
+
+def image_intent(text):
+    """Conservative natural-language image request. Returns the drawing request text or None."""
+    t = (text or "").strip()
+    if not t or len(t) > 400 or t.startswith("/"):
+        return None
+    if _IMG_VERB.search(t) and _IMG_NOUN.search(t) and not _IMG_NOT.search(t):
+        return t
+    return None
+
+
 def _needs_live_lookup(text):
     t = text or ""
     return bool(_LIVE.search(t) and _LIVE_ASK.search(t))
@@ -478,8 +493,8 @@ class App:
                                 print("tg_sendDocument(wav) status", r.status_code)
                                 if r.status_code >= 400:
                                     await self._tg_send(chat_id, "Audio could not be sent.")
-                elif low.startswith("/image"):
-                    ip = text[6:].strip()
+                elif low.startswith("/image") or (image_intent(text) is not None and getattr(self, "ai", None) is not None):
+                    ip = text[6:].strip() if low.startswith("/image") else image_intent(text)
                     if not ip or len(ip) > 400:
                         await self._tg_send(chat_id, "Usage: /image <what to draw> (up to 400 characters).")
                     elif getattr(self, "ai", None) is None:
