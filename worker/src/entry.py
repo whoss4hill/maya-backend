@@ -54,9 +54,27 @@ class MayaState(DurableObject):
         raw = await self.ctx.storage.get("hist")
         return raw if raw else "[]"
 
-    async def job_set(self, state, note=""):
+    async def job_set(self, state, note="", alarm_s=0):
         import time as _t
         await self.ctx.storage.put("job", json.dumps({"state": state, "note": note, "ts": _t.time()}))
+        if alarm_s:  # watchdog: if the job is still "processing" when this fires, tell the owner instead of losing it silently
+            await self.ctx.storage.setAlarm(int((_t.time() + alarm_s) * 1000))
+
+    async def alarm(self):
+        raw = await self.ctx.storage.get("job")
+        job = json.loads(raw) if raw else {}
+        if job.get("state") != "processing":
+            return
+        job["state"] = "lost"
+        await self.ctx.storage.put("job", json.dumps(job))
+        if str(job.get("note", "")).startswith("bgtest"):
+            return  # controlled test: no outbound message
+        core = await self._core(); b = core.bound_id
+        if b:
+            from net import Http
+            _load_env(self.env)
+            await Http().post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN','')}/sendMessage",
+                              json={"chat_id": b, "text": "I could not finish your last message. Please send it again."})
 
     async def job_get(self):
         raw = await self.ctx.storage.get("job")
@@ -148,8 +166,8 @@ class DOState:
     async def history(self):
         return json.loads(await self.stub.history())
 
-    async def job_set(self, state, note=""):
-        await self.stub.job_set(state, note)
+    async def job_set(self, state, note="", alarm_s=0):
+        await self.stub.job_set(state, note, alarm_s)
 
     async def job_get(self):
         return json.loads(await self.stub.job_get())
