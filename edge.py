@@ -3,7 +3,7 @@ over the Free plan's 10 ms limit). Same behaviour as main.py for: /health, /v1/c
 Search is not included (OFF by design). The /auth/reset page is not ported yet (main.py still serves it on Render).
 handle() is pure logic over an injected Http and state, so it is testable without Cloudflare."""
 import re
-import asyncio, json, os, re
+import asyncio, json, os, re, time
 
 from net import Http
 import gmail_tools, github_tools
@@ -115,15 +115,23 @@ class App:
         r = None
         for model in models:
             for attempt in range(2):
-                r = await self.http.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt, history))
+                try:
+                    r = await self.http.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        headers={"Content-Type": "application/json", "x-goog-api-key": self.gem_key}, json=self._gem(prompt, history), timeout=9)
+                except Exception as ex:
+                    print("gemini", model, "call failed", type(ex).__name__)
+                    self.last_gemini_status = "timeout"
+                    r = None
+                    break
                 self.last_gemini_status = r.status_code
                 print("gemini", model, "status", r.status_code, "chars", len(r.text))
                 if r.status_code in (500, 503) and attempt == 0:
                     await asyncio.sleep(2)
                     continue
                 break
+            if r is None:
+                continue
             if r.status_code == 200:
                 try:
                     parts = r.json()["candidates"][0]["content"]["parts"]
@@ -145,6 +153,19 @@ class App:
             data = {}
         if path == "/health" and method == "GET":
             return 200, {"ok": True, "service": "maya-backend-edge"}
+        if path == "/telegram/bgtest" and hasattr(self.state, "job_set"):
+            import hmac as _h
+            if not _h.compare_digest(headers.get("x-telegram-bot-api-secret-token", "").encode(), os.environ.get("MAYA_TELEGRAM_SECRET", "x").encode()):
+                return self.err(403, "forbidden")
+            if method == "POST":
+                async def _bg():
+                    await asyncio.sleep(5)
+                    await self.state.job_set("bgtest-finished", "after 5s background sleep")
+                await self.state.job_set("bgtest-started", "")
+                if getattr(self, "defer", None):
+                    self.defer(_bg())
+                return 200, {"scheduled": True}
+            return 200, await self.state.job_get()
         if path == "/telegram/webhook" and method == "POST":
             return await self._tg_webhook(headers, data)
         if path.startswith("/v1/"):
@@ -256,24 +277,42 @@ class App:
             return 200, {}
         # Answer Telegram at once: slow model calls must not hold the webhook open (Telegram times out at ~60 s,
         # reports "Read timeout expired", and the update id is already consumed, so the message would be lost silently).
+        try:
+            prev = await self.state.job_get() if hasattr(self.state, "job_get") else None
+            if prev and prev.get("state") == "processing" and time.time() - prev.get("ts", 0) > 60 and status == "ok":
+                await self._tg_send(chat_id, "My previous reply did not finish. If you did not get it, please send it again.")
+        except Exception as ex:
+            print("stale job check error", type(ex).__name__)
+        await self._job("processing", status, text)
         if getattr(self, "defer", None):
             self.defer(self._tg_guarded(status, text, chat_id))
         else:
             await self._tg_guarded(status, text, chat_id)
         return 200, {}
 
-    BUDGET_S = 26  # Workers keep background work alive ~30 s after the response
+    BUDGET_S = 24  # Workers keep background work alive ~30 s after the response
+
+    async def _job(self, state, status="", text=""):
+        """Durable job record in the Durable Object: processing -> done | error | timeout (never silent loss)."""
+        try:
+            if hasattr(self.state, "job_set"):
+                await self.state.job_set(state, str(text)[:60])
+        except Exception as ex:
+            print("job_set error", type(ex).__name__)
 
     async def _tg_guarded(self, status, text, chat_id):
         try:
             await asyncio.wait_for(self._tg_process(status, text, chat_id), self.BUDGET_S)
+            await self._job("done")
         except asyncio.TimeoutError:
+            await self._job("timeout")
             print("tg budget exceeded")
             try:
                 await self._tg_send(chat_id, "That took too long and I could not finish it. Please send it again in a bit.")
             except Exception:
                 pass
         except Exception as ex:
+            await self._job("error")
             print("tg guarded error", type(ex).__name__)
 
     async def _action(self, chat_id, action):
