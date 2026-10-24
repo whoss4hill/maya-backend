@@ -27,3 +27,57 @@ def test_image_validation_and_failure(app):
 
 def test_image_requires_jwt(app):
     s, b = T.run(app.handle("POST", "/v1/image", {}, json.dumps({"prompt": "a kite"}))); assert s == 401
+
+
+# ---- Telegram /image and backup text
+import base64
+from test_edge import Resp
+
+def sent_texts(app):
+    return [k["json"]["text"] for m, u, k in app.http.calls if u.endswith("/sendMessage")]
+
+def files(app): return [(u, k) for m, u, k in app.http.calls if m == "FILE"]
+
+def test_tg_image_sends_photo(app):
+    app.tg_token = "T"; app.ai = FakeAI(base64.b64encode(b"\xff\xd8jpegbytes").decode())
+    T.run(app._tg_process("ok", "/image a red kite", 42))
+    f = files(app)
+    assert len(f) == 1 and f[0][0].endswith("/sendPhoto") and f[0][1]["data"].startswith(b"\xff\xd8")
+    assert f[0][1]["fields"]["chat_id"] == 42
+
+def test_tg_image_unavailable_is_truthful_and_sends_nothing(app):
+    app.tg_token = "T"; app.ai = FakeAI(None)
+    T.run(app._tg_process("ok", "/image a kite", 42))
+    assert not files(app) and "could not make the image" in " ".join(sent_texts(app))
+
+def test_tg_image_secret_prompt_refused_before_ai(app):
+    app.tg_token = "T"; app.ai = FakeAI("QUJD")
+    T.run(app._tg_process("ok", "/image my password is Hunter22abcd", 42))
+    assert not app.ai.calls and not files(app)
+
+def test_tg_image_usage_and_video_honest(app):
+    app.tg_token = "T"; app.ai = FakeAI("QUJD")
+    T.run(app._tg_process("ok", "/image", 42)); T.run(app._tg_process("ok", "/video a cat", 42))
+    t = " ".join(sent_texts(app))
+    assert "Usage: /image" in t and "Video generation is not available" in t and not app.ai.calls
+
+class TextAI(FakeAI):
+    def __init__(self, out): super().__init__(None); self.tout = out
+    async def text(self, p): return self.tout
+
+def _gemini_429(app):
+    orig = app.http._r
+    async def r(m, url, **k):
+        if "generateContent" in url:
+            app.http.calls.append((m, url, k)); return Resp(429, "{}")
+        return await orig(m, url, **k)
+    app.http._r = r
+
+def test_backup_text_used_and_labelled_when_gemini_exhausted(app):
+    app.tg_token = "T"; _gemini_429(app); app.ai = TextAI("backup says hi")
+    out = T.run(app._gemini("hello"))
+    assert out.startswith("backup says hi") and "Backup AI model" in out
+
+def test_no_backup_gives_none(app):
+    _gemini_429(app)
+    assert T.run(app._gemini("hello")) is None
