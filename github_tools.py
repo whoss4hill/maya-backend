@@ -49,3 +49,44 @@ def plan_preview(cmd, default_branch=None):
     if default_branch and cmd["branch"] == default_branch:
         return "Default branch pe push nahi karungi. Naya/dev branch batao."
     return f"Plan (NOT pushed)\n{cmd['repo']} @ {cmd['branch']}\n{cmd['path']}: {cmd['instruction']}\n\nTests pehle chalenge. Push ke liye 'yes push' likho."
+
+
+# ---- request builders / response parsers (no network here; the caller sends with the token from a Worker secret) ----
+import base64, json as _json
+
+MAX_READ = 20000  # chars returned to chat
+
+
+def api_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "maya-assistant"}
+
+
+def parse_read(resp_json: dict) -> str:
+    """Decode a contents-API file response. Refuses directories and large files."""
+    if not isinstance(resp_json, dict) or resp_json.get("type") != "file":
+        return "Not a single file."
+    if resp_json.get("size", 0) > 200_000:
+        return "File too large to show."
+    try:
+        txt = base64.b64decode(resp_json.get("content", "")).decode("utf-8")
+    except Exception:
+        return "File is not text."
+    return txt[:MAX_READ] + ("\n...[cut]" if len(txt) > MAX_READ else "")
+
+
+def write_body(repo, branch, path, new_text, message, prev_sha=None) -> dict:
+    """PUT /contents body. Re-checks the guards: never main/protected, only allowed repos/paths."""
+    err = check(repo, branch, path, write=True)
+    if err:
+        raise ValueError(err)
+    if len(new_text) > 200_000:
+        raise ValueError("too_large")
+    body = {"message": message[:200], "content": base64.b64encode(new_text.encode()).decode(), "branch": branch}
+    if prev_sha:
+        body["sha"] = prev_sha
+    return body
+
+
+def confirm_matches(pending: dict, text: str) -> bool:
+    """Only an exact 'yes push' from the bound owner executes a stored plan, and only once."""
+    return bool(pending) and (text or "").strip().lower() == "yes push" and not pending.get("used")
