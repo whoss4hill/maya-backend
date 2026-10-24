@@ -263,7 +263,7 @@ def test_photo_variant_picked_strictly_below_512():
     import telegram_channel as tc
     from state_core import State
     import os
-    os.environ.setdefault("MAYA_TELEGRAM_ENABLED", "1"); os.environ.setdefault("MAYA_TELEGRAM_SECRET", "s3")
+    os.environ["MAYA_TELEGRAM_ENABLED"] = "1"; os.environ["MAYA_TELEGRAM_SECRET"] = "s3"
     upd = {"update_id": 5, "message": {"message_id": 9, "date": 2000000000,
         "from": {"id": 42, "is_bot": False}, "chat": {"id": 42, "type": "private"},
         "caption": "edit it",
