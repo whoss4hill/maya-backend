@@ -38,6 +38,18 @@ class Core:
         return self.data["pair"].get("bound_id")
 
     # -- owner actions (caller must have authenticated the Maya owner)
+    MODEL_PREFS = ("auto", "backup_only")
+
+    @property
+    def model_pref(self):
+        v = self.data.get("model_pref", "auto")
+        return v if v in self.MODEL_PREFS else "auto"
+
+    def set_model_pref(self, v):
+        if v not in self.MODEL_PREFS:
+            raise ValueError("bad_model_pref")
+        self.data["model_pref"] = v
+
     def set_enabled(self, on: bool):
         self.data["tg"]["owner_enabled"] = bool(on)
         self._audit({"event": "toggle", "on": bool(on)})
