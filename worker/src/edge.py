@@ -265,6 +265,10 @@ class App:
         first = await self.ai.image(prompt, model=DEFAULT_IMAGE_MODEL, image_bytes=image_bytes)
         if first:
             return first, IMAGE_ENGINE_NAMES[DEFAULT_IMAGE_MODEL], False
+        if image_bytes:
+            # edit request: the fallback engine accepts no input image, so falling back would
+            # silently return a FRESH generation that ignores the owner's photo. Fail honestly.
+            return None, None, False
         second = await self.ai.image(prompt, model=FALLBACK_IMAGE_MODEL, image_bytes=image_bytes)
         if second:
             return second, IMAGE_ENGINE_NAMES[FALLBACK_IMAGE_MODEL], True
