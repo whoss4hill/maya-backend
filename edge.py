@@ -193,7 +193,10 @@ class App:
         if path == "/v1/telegram/status" and method == "GET":
             return 200, await self.state.status()
         if path == "/v1/telegram/pair/start" and method == "POST":
-            return 200, {"code": await self.state.pair_start(), "expires_in": 600}
+            tid = data.get("chat_id")
+            if tid is not None and (isinstance(tid, bool) or not isinstance(tid, int) or tid <= 0):
+                return self.err(400, "bad_chat_id")
+            return 200, {"code": await self.state.pair_start(tid), "expires_in": 600}
         if path == "/v1/telegram/toggle" and method == "POST":
             if not isinstance(data.get("on"), bool):
                 return self.err(400, "on_required")
