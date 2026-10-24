@@ -29,6 +29,7 @@ class FakeHttp:
         self.calls.append((m, url, k))
         if url.endswith("/auth/v1/user"): return Resp(200, json.dumps({"id": "aaa-1"}))
         if "generateContent" in url: return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
+        if "auth_tokens" in url: return Resp(200, json.dumps({"name": "auth_tokens/deadbeef1234", "expireTime": "2099-01-01T00:00:00Z"}))
         if "/rest/v1/memories" in url and m == "POST": return Resp(201, json.dumps([{"id": "m1"}]))
         return Resp(200, "[]")
     async def post_file(self, url, fields, filename, data, mime="application/pdf", field="document"):
@@ -442,3 +443,47 @@ def test_vn_request_goes_to_tts_not_gemini_chat(app, monkeypatch):
     run(app._tg_process("ok", "Ak vn send kro jisme hello golu mere jaan kaise ho kya kr rahe ho bolo", 42))
     assert sent == ["hello golu mere jaan kaise ho kya kr rahe ho"]
     assert not any("generateContent" in u for _, u, _ in app.http.calls)
+
+def test_live_token_mint(app):
+    st, body = run(app.handle("POST", "/v1/live/token", A, "{}"))
+    assert st == 200, body
+    assert body["token"].startswith("auth_tokens/")
+    assert body["model"] == "models/gemini-3.8-live"
+    assert body["ws_url"].endswith(body["token"])
+    assert "BidiGenerateContentConstrained" in body["ws_url"] and "v1alpha" in body["ws_url"]
+    calls = [c for c in app.http.calls if "auth_tokens" in c[1]]
+    assert len(calls) == 1
+    m, url, k = calls[0]
+    assert m == "POST" and "v1beta/auth_tokens" in url
+    assert k["headers"]["x-goog-api-key"] == "g"
+    b = k["json"]
+    assert b["uses"] == 1 and b["expireTime"].endswith("Z")
+    setup = b["bidiGenerateContentSetup"]
+    assert setup["model"] == "models/gemini-3.8-live"
+    assert setup["generationConfig"]["responseModalities"] == ["AUDIO"]
+    assert "sessionResumption" in setup
+    assert "systemInstruction" not in setup and "speechConfig" not in setup.get("generationConfig", {})
+
+def test_live_token_auth_required(app):
+    assert run(app.handle("POST", "/v1/live/token", {}, "{}"))[0] == 401
+    assert not [c for c in app.http.calls if "auth_tokens" in c[1]]
+
+def test_live_token_upstream_failure_honest(app):
+    async def fail(url, **k):
+        if "auth_tokens" in url: return Resp(429, "{}")
+        return await FakeHttp._r(app.http, "POST", url, **k)
+    app.http.post = fail
+    st, body = run(app.handle("POST", "/v1/live/token", A, "{}"))
+    assert st == 502 and body["error"] == "live_token_upstream"
+    assert "token" not in body
+
+def test_live_token_model_env_override(app, monkeypatch):
+    monkeypatch.setenv("MAYA_LIVE_MODEL", "models/gemini-2.5-flash-native-audio-preview-12-2025")
+    st, body = run(app.handle("POST", "/v1/live/token", A, "{}"))
+    assert st == 200 and body["model"].endswith("12-2025")
+
+def test_live_token_rate_limited(app):
+    for _ in range(30):
+        assert run(app.handle("POST", "/v1/live/token", A, "{}"))[0] == 200
+    st, body = run(app.handle("POST", "/v1/live/token", A, "{}"))
+    assert st == 429 and body["bucket"] == "write"

@@ -1,5 +1,5 @@
 """Plain-Python router for the Cloudflare Worker (no FastAPI/pydantic import: they cost ~20 ms CPU per cold start,
-over the Free plan's 10 ms limit). Same behaviour as main.py for: /health, /v1/chat, /v1/memories, /v1/tasks, Telegram.
+over the Free plan's 10 ms limit). Same behaviour as main.py for: /health, /v1/chat, /v1/memories, /v1/tasks, /v1/live/token, Telegram.
 Search is not included (OFF by design). The /auth/reset page is not ported yet (main.py still serves it on Render).
 handle() is pure logic over an injected Http and state, so it is testable without Cloudflare."""
 import re
@@ -433,6 +433,8 @@ class App:
             return 200, {"model": await self.state.model_pref_get(),
                          "options": ["auto", "backup_only"] + list(WORKER_MODELS) + list(OPENROUTER_MODELS) + list(GROQ_MODELS),
                          "labels": {"auto": "Maya chooses (Gemini first, backup if busy)", "backup_only": "Backup model only", **WORKER_MODELS, **OPENROUTER_MODELS, **GROQ_MODELS}}
+        if path == "/v1/live/token" and method == "POST":
+            return await self._live_token()
         if path == "/v1/telegram/status" and method == "GET":
             return 200, await self.state.status()
         if path == "/v1/telegram/pair/start" and method == "POST":
@@ -456,6 +458,35 @@ class App:
             await self.state.revoke()
             return 200, {"revoked": True}
         return self.err(404, "not_found")
+
+
+    LIVE_TOKEN_TTL_MIN = 30
+    LIVE_WS = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token="
+
+    async def _live_token(self):
+        """Mint a single-use ephemeral token so the app can open a client-direct Gemini Live session.
+        Audio never passes through this backend; the token is locked to the configured live model,
+        AUDIO output and session resumption. No token value is ever logged or stored."""
+        model = _env("MAYA_LIVE_MODEL", "models/gemini-3.8-live")
+        if not re.fullmatch(r"models/[A-Za-z0-9._-]{1,60}", model):
+            return self.err(500, "live_model_invalid")
+        import datetime
+        exp = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=self.LIVE_TOKEN_TTL_MIN)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = {"uses": 1, "expireTime": exp,
+                "bidiGenerateContentSetup": {"model": model,
+                                             "generationConfig": {"responseModalities": ["AUDIO"]},
+                                             "sessionResumption": {}}}
+        try:
+            r = await self.http.post("https://generativelanguage.googleapis.com/v1beta/auth_tokens",
+                                     headers={"x-goog-api-key": self.gem_key, "Content-Type": "application/json"},
+                                     json=body)
+            tok = r.json().get("name", "") if r.status_code == 200 else ""
+        except Exception:
+            return self.err(502, "live_token_upstream")
+        if not tok.startswith("auth_tokens/"):
+            return self.err(502, "live_token_upstream")
+        return 200, {"token": tok, "expire_time": exp, "model": model, "ws_url": self.LIVE_WS + tok,
+                     "note": "Single use; connect within 1 minute of mint. Audio flows directly between the app and Google, never through this backend."}
 
     async def _tg_send(self, chat_id, text):
         return await self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
