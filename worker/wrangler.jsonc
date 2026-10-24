@@ -5,7 +5,7 @@
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["python_workers", "disable_python_external_sdk"],
   "ai": { "binding": "AI" },
-  "vars": { "MAYA_REQUIRE_JWT_MODE": "1" },
+  "vars": { "MAYA_REQUIRE_JWT_MODE": "1", "MAYA_LIVE_MODEL": "models/gemini-2.5-flash-native-audio-preview-12-2025" },
   "durable_objects": { "bindings": [{ "name": "MAYA_STATE", "class_name": "MayaState" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MayaState"] }],
   // Secrets are set with `wrangler secret put` (never in this file):
