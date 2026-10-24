@@ -38,8 +38,8 @@ class MayaState(DurableObject):
         await self._save(core)
         return json.dumps(out)
 
-    async def pair_start(self):
-        core = await self._core(); code = core.pair_start(); await self._save(core); return code
+    async def pair_start(self, target_id=None):
+        core = await self._core(); code = core.pair_start(target_id=target_id); await self._save(core); return code
 
     async def set_enabled(self, on):
         core = await self._core(); core.set_enabled(bool(on)); await self._save(core)
@@ -125,8 +125,8 @@ class DOState:
     async def update(self, headers, update):
         return tuple(json.loads(await self.stub.update(json.dumps(headers), json.dumps(update))))
 
-    async def pair_start(self):
-        return await self.stub.pair_start()
+    async def pair_start(self, target_id=None):
+        return await self.stub.pair_start(target_id)
 
     async def set_enabled(self, on):
         await self.stub.set_enabled(on)
