@@ -29,7 +29,7 @@ class Http:
         self.timeout = timeout
         self._client = None
 
-    async def _request(self, method, url, headers=None, params=None, json=None):
+    async def _request(self, method, url, headers=None, params=None, json=None, timeout=None):
         if params:
             url = url + ("&" if "?" in url else "?") + urlencode(params)
         headers = dict(headers or {})
@@ -41,8 +41,12 @@ class Http:
             init = {"method": method, "headers": headers}
             if body is not None:
                 init["body"] = body
-            r = await _js_fetch(url, _to_js(init, dict_converter=_JsObject.fromEntries))
-            return Resp(int(r.status), await r.text())
+            import asyncio as _aio
+
+            async def _go():
+                r = await _js_fetch(url, _to_js(init, dict_converter=_JsObject.fromEntries))
+                return Resp(int(r.status), await r.text())
+            return await _aio.wait_for(_go(), timeout or self.timeout)  # Workers fetch has no timeout of its own
         import httpx
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self.timeout)
