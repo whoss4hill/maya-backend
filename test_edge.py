@@ -80,7 +80,7 @@ def test_telegram_pair_command_toggle(app):
     tg(3, 99, "ping"); assert len([1 for _, u, _ in app.http.calls if "sendMessage" in u]) == n
     tg(5, 42, "/pdf cat facts"); f = [k for m, _, k in app.http.calls if m == "FILE"]
     assert len(f) == 1 and f[0]["fields"]["chat_id"] == 42 and f[0]["fields"]["caption"].startswith("PDF: ") and f[0]["data"][:5] == b"%PDF-"
-    tg(6, 42, "/image a dog"); assert "not enabled" in [k["json"] for _, u, k in app.http.calls if "sendMessage" in u][-1]["text"]
+    tg(6, 42, "/image a dog"); assert "not set up on this server" in [k["json"] for _, u, k in app.http.calls if "sendMessage" in u][-1]["text"]
     tg(7, 99, "/pdf x"); assert len([1 for m, _, _ in app.http.calls if m == "FILE"]) == 1
     run(app.handle("POST", "/v1/telegram/toggle", A, json.dumps({"on": False}))); k0 = len(app.http.calls); tg(8, 42, "ping")
     assert not any("sendMessage" in u for _, u, _ in app.http.calls[k0:])
