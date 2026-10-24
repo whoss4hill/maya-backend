@@ -13,6 +13,14 @@ POS = [
     "cvv 123",
     "use Bearer " + "a" * 30 + " for it",
     "bot " + "1234567890:" + "A" * 35,
+    "password is $ecret99x",
+    "password: (hunter22abc)",
+    "password = <Hunter22abc",
+    "my pin is [4821]",
+    "password: {hunter2xyz}",
+    "password: %ecret99%",
+    "password: <" + "A1b2C3d4E5f6>",
+    "token: $" + "ghp" + "_" + "a" * 36,
 ]
 NEG = [
     "I take 3 pins and 123 pens",
