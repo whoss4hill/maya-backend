@@ -81,3 +81,29 @@ def test_backup_text_used_and_labelled_when_gemini_exhausted(app):
 def test_no_backup_gives_none(app):
     _gemini_429(app)
     assert T.run(app._gemini("hello")) is None
+
+
+# ---- natural-language image intent
+import pytest
+import edge as E
+
+@pytest.mark.parametrize("t", [
+    "ek red kite ki image bana do", "draw a picture of a dog on a beach", "generate an image of a mountain at dawn",
+    "mere liye ek tasveer banao billi ki", "make an illustration of a robot"])
+def test_image_intent_positive(t): assert E.image_intent(t)
+
+@pytest.mark.parametrize("t", [
+    "send me my pictures from the gallery", "find the image I saved yesterday", "photo of me edit this",
+    "open the picture in my gallery", "make a reminder for 5 pm", "what is an image file format",
+    "bana do ek reminder", "forward this image to mom", "/image a kite", "delete that picture"])
+def test_image_intent_negative(t): assert not E.image_intent(t)
+
+def test_tg_natural_image_request_runs_image(app):
+    app.tg_token = "T"; app.ai = FakeAI(base64.b64encode(b"\xff\xd8x").decode())
+    T.run(app._tg_process("ok", "ek red kite ki image bana do", 42))
+    assert files(app) and files(app)[0][0].endswith("/sendPhoto")
+
+def test_tg_natural_request_without_ai_falls_to_normal_chat(app):
+    app.tg_token = "T"
+    T.run(app._tg_process("ok", "ek red kite ki image bana do", 42))
+    assert not files(app)
