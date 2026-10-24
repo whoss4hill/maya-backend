@@ -120,3 +120,21 @@ def test_oversized_v1_body_rejected_before_anything(app):
 def test_normal_body_still_ok(app):
     s, b = T.run(app.handle("POST", "/v1/chat", T.A, json.dumps({"message": "hello"})))
     assert s == 200
+
+
+def test_model_pref_roundtrip_and_validation(app):
+    s, b = T.run(app.handle("GET", "/v1/settings/model", T.A, ""))
+    assert s == 200 and b["model"] == "auto"
+    s, b = T.run(app.handle("POST", "/v1/settings/model", T.A, json.dumps({"model": "gpt-5"})))
+    assert s == 422
+    s, b = T.run(app.handle("POST", "/v1/settings/model", T.A, json.dumps({"model": "backup_only"})))
+    assert s == 200 and b["model"] == "backup_only"
+
+def test_backup_only_skips_gemini(app):
+    T.run(app.handle("POST", "/v1/settings/model", T.A, json.dumps({"model": "backup_only"})))
+    s, b = T.run(app.handle("POST", "/v1/chat", T.A, json.dumps({"message": "hello"})))
+    assert not any("generateContent" in c[1] for c in app.http.calls)
+
+def test_settings_model_needs_owner(app):
+    s, b = T.run(app.handle("GET", "/v1/settings/model", {}, ""))
+    assert s in (401, 403)
