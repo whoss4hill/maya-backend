@@ -236,10 +236,10 @@ class App:
             u, tok, e = await self.user(headers)
             if e:
                 return e
-            return await self._v1(method, path, u, tok, data)
+            return await self._v1(method, path, u, tok, data, media=headers.get("x-maya-media") == "1")
         return self.err(404, "not_found")
 
-    async def _v1(self, method, path, u, tok, data):
+    async def _v1(self, method, path, u, tok, data, media=False):
         sb, uid = self._sb(tok), u["id"]
         rest = f"{self.url}/rest/v1"
         if path == "/v1/chat" and method == "POST":
@@ -248,6 +248,10 @@ class App:
                 return self.err(400, "message_required")
             if secret_guard.looks_like_secret(msg):
                 return 200, {"reply": secret_guard.NOTICE}  # not stored, not sent to the model
+            if media and getattr(self, "ai", None) is not None:
+                ip = image_intent(msg)
+                if ip is not None:  # opt-in clients only: they then call /v1/image; installed clients never see this field
+                    return 200, {"reply": "Ek minute, tasveer bana rahi hoon.", "image_prompt": ip[:400]}
             r = await self.http.get(f"{rest}/memories", headers=sb, params={
                 "select": "kind,content", "user_id": f"eq.{uid}", "order": "last_used_at.desc.nullslast", "limit": "20"})
             mem = r.json() if r.status_code == 200 else []
