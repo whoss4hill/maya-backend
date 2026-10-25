@@ -104,3 +104,45 @@ def test_injection_in_source_text_stays_data(app, monkeypatch):
     assert "UNTRUSTED" in body
     # and the injected text never reaches the owner as Maya's own words: reply is the fake model's "pong"
     assert all("PIN 1234" not in t for t in sent_texts(app))
+
+
+def test_gate_private_never_fetches(app, monkeypatch):
+    monkeypatch.setenv("MAYA_WEB_SEARCH", "1")
+    private_queries = [
+        "/search mera appointment kab hai",
+        "/search meri email ka password",
+        "/search contact me at sahil.test@example.com",
+        "/search call 9834058076 details",
+        "/search my bank account balance",
+        "/search aadhaar 123456789012 status",
+    ]
+    for q in private_queries:
+        app.http.calls.clear()
+        T.run(app._tg_process("ok", q, 42))
+        assert ext_calls(app) == [], "private-looking query must never reach public endpoints: " + q
+        assert any("personal jaankari" in t for t in sent_texts(app)), q
+
+
+def test_gate_website_and_local_business_refused(app, monkeypatch):
+    monkeypatch.setenv("MAYA_WEB_SEARCH", "1")
+    blocked = [
+        "/search https://flipkart.com iphone deal",
+        "/search amazon.in order status",
+        "/search pizza near me",
+        "/search zomato order tracking",
+        "/search www.irctc.co.in train booking",
+    ]
+    for q in blocked:
+        app.http.calls.clear()
+        T.run(app._tg_process("ok", q, 42))
+        assert ext_calls(app) == [], "website/local-business query must be refused before fetch: " + q
+        assert any("check nahi kar sakti" in t for t in sent_texts(app)), q
+
+
+def test_gate_allows_general_topics():
+    assert ws.gate("ISRO latest mission") is None
+    assert ws.gate("monsoon news india") is None
+    assert ws.gate("Wordle") is None
+    assert ws.gate("2024 olympics medals") is None  # a year is not a private digit run
+    assert ws.gate("iphone 17 price") == "unsupported"
+    assert ws.gate("mera order kahan hai") == "private"

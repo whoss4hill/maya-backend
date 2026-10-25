@@ -1015,10 +1015,13 @@ class App:
                     else:
                         q = re.sub(r"(?i)\s*(ki\s+)?khabar\s*$", "", text).strip()
                     q = ws.clean_query(q)
+                    gated = ws.gate(q) if q else "empty"
                     if not q:
                         await self._tg_send(chat_id, "Usage: /search <kya jaanna hai> - general facts ya news ke liye.")
-                    elif ws.UNSUPPORTED.search(q):
-                        await self._tg_send(chat_id, "Ye sirf general facts aur news ke liye hai. Prices, train/flight schedule ya live status main check nahi kar sakti - uske liye IRCTC/NTES ya us service ka app dekh lo.")
+                    elif gated == "private":
+                        await self._tg_send(chat_id, "Isme personal jaankari lag rahi hai, isliye main ise public search par nahi bhejungi. Sirf general topic likho - jaise /search ISRO ya /search monsoon news.")
+                    elif gated:
+                        await self._tg_send(chat_id, "Ye sirf general facts aur news ke liye hai. Prices, train/flight schedule, kisi specific website ya local dukaan ki jaankari main check nahi kar sakti - uske liye us service ka app dekh lo.")
                     else:
                         wiki = await ws.fetch_wikipedia(self.http, q)
                         news = await ws.fetch_gdelt(self.http, q)

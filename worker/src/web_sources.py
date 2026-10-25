@@ -27,9 +27,37 @@ _URL_OK = re.compile(r"^https://[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/\S*)?$")
 
 # queries this feature must NOT attempt (explicitly unsupported classes)
 UNSUPPORTED = re.compile(
-    r"\b(price|prices|cost|daam|daam|keemat|rate|rates|ticket|tickets|booking|book|schedule|"
+    r"\b(price|prices|cost|daam|keemat|rate|rates|ticket|tickets|booking|book|schedule|"
     r"timing|timings|pnr|train|flight|bus|stock|share price|crypto|bitcoin|gold rate|silver rate|"
     r"petrol|diesel|weather forecast|mausam)\b", re.I)
+
+# specific websites / local business / order tracking: not answerable from facts+news sources
+_WEB_LOCAL = re.compile(
+    r"(https?://|www\.|\.[a-z]{2,3}\b|near me|ke paas|paas me|order status|track (my )?order|"
+    r"\b(zomato|swiggy|amazon|flipkart|myntra|ola|uber|irctc|makemytrip)\b.{0,30}\b(order|status|booking|delivery|near|offer|deal)\b)",
+    re.I)
+
+# PRIVATE: anything that looks like the user's own data must never leave for a public endpoint.
+# Possessive + private noun, raw emails, phone numbers, long digit runs (account/ID/OTP-like).
+_PRIVATE_NOUN = re.compile(
+    r"\b(mera|meri|mere|mer\w*|my)\s+(\w+\s){0,2}"
+    r"(appointment|address|pata|email|mail|inbox|password|otp|pin|account|phone|number|order|"
+    r"aadhaar|aadhar|pan|card|bank|balance|statement|invoice|bill|resume|document|file|photo|location)\b", re.I)
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE = re.compile(r"(?<!\d)(\+?\d[\d -]{8,}\d)(?!\d)")
+_LONG_DIGITS = re.compile(r"\b\d{6,}\b")
+
+
+def gate(query):
+    """Conservative public-topic gate. Returns None when the query is safe to send to public
+    keyless endpoints, else 'private' or 'unsupported'. Anything resembling the user's own
+    data, a specific website, local business or an unsupported class is refused BEFORE fetch."""
+    q = query or ""
+    if _PRIVATE_NOUN.search(q) or _EMAIL.search(q) or _PHONE.search(q) or _LONG_DIGITS.search(q):
+        return "private"
+    if UNSUPPORTED.search(q) or _WEB_LOCAL.search(q):
+        return "unsupported"
+    return None
 
 
 def clean(text, cap):
