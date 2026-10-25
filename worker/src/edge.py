@@ -11,6 +11,10 @@ import gmail_tools, github_tools, secret_guard
 from pdfgen import make_pdf, unsupported_chars, UnsupportedText
 
 
+def _pdf_file(topic):
+    return "PDF: " + topic[:100], (re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:40] or "document") + ".pdf"
+
+
 def _env(k, d=""):
     return os.environ.get(k, d)
 
@@ -568,6 +572,7 @@ class App:
     async def _tg_guarded(self, status, text, chat_id):
         self._job_start = time.monotonic()
         self._pending = None
+        self._pending_pdf = None
         try:
             await asyncio.wait_for(self._tg_process(status, text, chat_id), self.BUDGET_S)
             await self._job("done")
@@ -578,6 +583,7 @@ class App:
             # If the answer was already generated but the voice send ate the budget, deliver it as text now
             # (reserved seconds after the guard) instead of losing it. Marker is cleared before sending: no duplicates.
             pend, self._pending = self._pending, None
+            pend_pdf, self._pending_pdf = self._pending_pdf, None
             delivered = False
             if pend:
                 try:
@@ -586,6 +592,17 @@ class App:
                     print("timeout recovery send", r.status_code if r else "?")
                 except Exception as ex:
                     print("timeout recovery error", type(ex).__name__)
+            if pend_pdf and not delivered:
+                # Duplicate risk accepted (same as the text rescue above): Telegram may have taken the first
+                # send while the guard fired - a duplicate document beats losing a finished one.
+                try:
+                    caption, fname, pdf = pend_pdf
+                    r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                                                  {"chat_id": chat_id, "caption": caption}, fname, pdf)
+                    delivered = r is not None and r.status_code < 400
+                    print("timeout recovery document send", r.status_code if r else "?")
+                except Exception as ex:
+                    print("timeout recovery document error", type(ex).__name__)
             if not delivered:
                 try:
                     await self._fail("tg_job", "timeout " + str(status))
@@ -896,7 +913,8 @@ class App:
                     else:
                         # Bound the requested length: an unbounded document often outlives the per-attempt
                         # window and the job budget, so every model times out and nothing is delivered.
-                        body = await self._gemini("Write a clear, well organised plain-text document (no markdown symbols), at most about 700 words, for: " + topic)
+                        body = await self._gemini(("Write a clear, well organised plain-text document (no markdown symbols), at most about 700 words. "
+                            "Start directly with the document content - no greeting, no preamble, no closing remarks. Topic: " + topic))
                         if not body:
                             await self._fail("pdf_model", "none " + str(getattr(self, "last_gemini_status", "?")))
                             await self._tg_send(chat_id, "Could not generate the document right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again in a minute.")
@@ -906,10 +924,14 @@ class App:
                             except UnsupportedText:
                                 await self._tg_send(chat_id, "The text contains characters the PDF font cannot show (for example Hindi). No PDF was created.")
                                 return 200, {}
+                            caption, fname = _pdf_file(topic)
+                            self._pending_pdf = (caption, fname, pdf)  # rescue marker: a budget timeout mid-send must not lose a finished document
                             r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
-                                                          {"chat_id": chat_id, "caption": "PDF: " + topic[:100]}, (re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:40] or "document") + ".pdf", pdf)
+                                                          {"chat_id": chat_id, "caption": caption}, fname, pdf)
+                            self._pending_pdf = None
                             print("tg_sendDocument status", r.status_code)
                             if r.status_code >= 400:
+                                await self._fail("pdf_send", "code=" + str(r.status_code))
                                 await self._tg_send(chat_id, "PDF could not be sent.")
                 elif re.match(r"^/?call\s+\S", low) and hasattr(self.state, "push_command"):
                     target = re.sub(r"^/?call\s+", "", text, flags=re.I).strip()[:80]

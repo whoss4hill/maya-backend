@@ -50,7 +50,7 @@ class FakeHttp:
         return Resp(200, "[]")
     async def post_file(self, url, fields, filename, data, mime="application/pdf", field="document"):
         self.calls.append(("FILE", url, {"fields": fields, "filename": filename, "data": data, "mime": mime, "field": field}))
-        return Resp(200, "{}")
+        return Resp(getattr(self, "file_status", 200), "{}")
     async def get(self, u, **k): return await self._r("GET", u, **k)
     async def post(self, u, **k): return await self._r("POST", u, **k)
     async def delete(self, u, **k): return await self._r("DELETE", u, **k)
@@ -523,3 +523,35 @@ def test_pdf_prompt_bounded_length(app):
     run(app._tg_process("ok", "/pdf notes", 42))
     payloads = [k["json"] for _, u, k in app.http.calls if "generateContent" in u]
     assert any("700 words" in p["contents"][-1]["parts"][0]["text"] for p in payloads)
+
+
+def test_pdf_send_failure_recorded(app):
+    H = {"X-Telegram-Bot-Api-Secret-Token": "s3"}
+    code = run(app.handle("POST", "/v1/telegram/pair/start", A, ""))[1]["code"]
+    def tg(i, text): return run(app.handle("POST", "/telegram/webhook", H, json.dumps({"update_id": i, "message": {"from": {"id": 42}, "chat": {"id": 42, "type": "private"}, "text": text, "date": int(time.time())}})))
+    tg(1, f"/pair {code}")
+    app.http.file_status = 500
+    tg(2, "/pdf notes")
+    msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
+    assert any("PDF could not be sent." in m for m in msgs)
+    assert any(f["stage"] == "pdf_send" and "code=500" in f["status"] for f in app.state.core.fail_get())
+
+
+def test_pdf_timeout_rescue_delivers_finished_document(app):
+    import asyncio as _aio
+    async def slow(status, text, chat_id):
+        app._pending_pdf = ("PDF: notes", "notes.pdf", b"%PDF-1.4 fake")
+        raise _aio.TimeoutError()
+    app._tg_process = slow
+    run(app._tg_guarded("ok", "/pdf notes", 42))
+    files = [k for m, _, k in app.http.calls if m == "FILE"]
+    assert len(files) == 1 and files[0]["fields"]["caption"] == "PDF: notes" and files[0]["data"] == b"%PDF-1.4 fake"
+    msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
+    assert not any("took too long" in m for m in msgs)
+
+
+def test_pdf_prompt_bounded_no_preamble(app):
+    run(app._tg_process("ok", "/pdf notes", 42))
+    payloads = [k["json"] for _, u, k in app.http.calls if "generateContent" in u]
+    assert any("700 words" in p["contents"][-1]["parts"][0]["text"] and "no preamble" in p["contents"][-1]["parts"][0]["text"] for p in payloads)
+    assert app._pending_pdf is None  # marker cleared after a completed send: no duplicate rescue later
