@@ -50,7 +50,7 @@ class FakeHttp:
         return Resp(200, "[]")
     async def post_file(self, url, fields, filename, data, mime="application/pdf", field="document"):
         self.calls.append(("FILE", url, {"fields": fields, "filename": filename, "data": data, "mime": mime, "field": field}))
-        return Resp(getattr(self, "file_status", 200), "{}")
+        return Resp(getattr(self, "file_status", 200), json.dumps({"ok": getattr(self, "file_ok", True), "result": {"message_id": 1}}))
     async def get(self, u, **k): return await self._r("GET", u, **k)
     async def post(self, u, **k): return await self._r("POST", u, **k)
     async def delete(self, u, **k): return await self._r("DELETE", u, **k)
@@ -535,6 +535,18 @@ def test_pdf_send_failure_recorded(app):
     msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
     assert any("PDF could not be sent." in m for m in msgs)
     assert any(f["stage"] == "pdf_send" and "code=500" in f["status"] for f in app.state.core.fail_get())
+
+
+def test_pdf_send_ok_false_recorded(app):
+    H = {"X-Telegram-Bot-Api-Secret-Token": "s3"}
+    code = run(app.handle("POST", "/v1/telegram/pair/start", A, ""))[1]["code"]
+    def tg(i, text): return run(app.handle("POST", "/telegram/webhook", H, json.dumps({"update_id": i, "message": {"from": {"id": 42}, "chat": {"id": 42, "type": "private"}, "text": text, "date": int(time.time())}})))
+    tg(1, f"/pair {code}")
+    app.http.file_ok = False  # HTTP 200 but Telegram says the document was not accepted
+    tg(2, "/pdf notes")
+    msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
+    assert any("PDF could not be sent." in m for m in msgs)
+    assert any(f["stage"] == "pdf_send" and "ok=false" in f["status"] for f in app.state.core.fail_get())
 
 
 def test_pdf_timeout_rescue_delivers_finished_document(app):

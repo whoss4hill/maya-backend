@@ -15,6 +15,14 @@ def _pdf_file(topic):
     return "PDF: " + topic[:100], (re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:40] or "document") + ".pdf"
 
 
+def _tg_doc_ok(r):
+    """Telegram answers sendDocument with a JSON body; only ok:true means the document was accepted."""
+    try:
+        return r.status_code < 400 and r.json().get("ok") is True
+    except Exception:
+        return False
+
+
 def _env(k, d=""):
     return os.environ.get(k, d)
 
@@ -599,7 +607,7 @@ class App:
                     caption, fname, pdf = pend_pdf
                     r = await self.http.post_file(f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
                                                   {"chat_id": chat_id, "caption": caption}, fname, pdf)
-                    delivered = r is not None and r.status_code < 400
+                    delivered = r is not None and _tg_doc_ok(r)
                     print("timeout recovery document send", r.status_code if r else "?")
                 except Exception as ex:
                     print("timeout recovery document error", type(ex).__name__)
@@ -930,8 +938,8 @@ class App:
                                                           {"chat_id": chat_id, "caption": caption}, fname, pdf)
                             self._pending_pdf = None
                             print("tg_sendDocument status", r.status_code)
-                            if r.status_code >= 400:
-                                await self._fail("pdf_send", "code=" + str(r.status_code))
+                            if not _tg_doc_ok(r):
+                                await self._fail("pdf_send", "code=" + str(r.status_code) + (" ok=false" if r.status_code < 400 else ""))
                                 await self._tg_send(chat_id, "PDF could not be sent.")
                 elif re.match(r"^/?call\s+\S", low) and hasattr(self.state, "push_command"):
                     target = re.sub(r"^/?call\s+", "", text, flags=re.I).strip()[:80]
