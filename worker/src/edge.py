@@ -1006,6 +1006,32 @@ class App:
                     await self._tg_send(chat_id, "Video generation is not available. No free video option is set up.")
                 elif _needs_live_lookup(text):
                     await self._tg_send(chat_id, "Abhi main live train, flight ya website check nahi kar sakti, to schedule ya status nahi bata sakti. Tum IRCTC ya NTES app dekh lo. Live lookup ab tak bana nahi hai.")
+                elif _env("MAYA_WEB_SEARCH") == "1" and (low.startswith("/search") or low.startswith("news ") or " ki khabar" in low or " khabar" == low[-7:]):
+                    import web_sources as ws
+                    if low.startswith("/search"):
+                        q = text[7:].strip()
+                    elif low.startswith("news "):
+                        q = text[5:].strip()
+                    else:
+                        q = re.sub(r"(?i)\s*(ki\s+)?khabar\s*$", "", text).strip()
+                    q = ws.clean_query(q)
+                    if not q:
+                        await self._tg_send(chat_id, "Usage: /search <kya jaanna hai> - general facts ya news ke liye.")
+                    elif ws.UNSUPPORTED.search(q):
+                        await self._tg_send(chat_id, "Ye sirf general facts aur news ke liye hai. Prices, train/flight schedule ya live status main check nahi kar sakti - uske liye IRCTC/NTES ya us service ka app dekh lo.")
+                    else:
+                        wiki = await ws.fetch_wikipedia(self.http, q)
+                        news = await ws.fetch_gdelt(self.http, q)
+                        if not wiki and not news:
+                            await self._tg_send(chat_id, "Is topic par abhi kuch nahi mil saka. Thodi der baad try karo ya thoda alag likhkar batao.")
+                        else:
+                            body = await self._gemini(ws.build_grounded_prompt(text, wiki, news))
+                            if not body:
+                                await self._tg_send(chat_id, "Maya could not get an answer from the AI right now (error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again.")
+                            else:
+                                srcs = ws.source_lines(wiki, news)
+                                out = body.strip()[:3500] + ("\n\nSources:\n" + "\n".join(srcs) if srcs else "")
+                                await self._tg_send(chat_id, out[:4000])
                 elif low.startswith("/mail") or low.startswith("/gh"):
                     await self._tg_send(chat_id, self._tool_reply(text))
                 else:

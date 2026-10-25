@@ -36,6 +36,11 @@ class FakeHttp:
         self.calls.append((m, url, k))
         if url.endswith("/auth/v1/user"): return Resp(200, json.dumps({"id": "aaa-1"}))
         if "getFile" in url: return Resp(200, json.dumps({"ok": True, "result": {"file_path": "files/p1.oga"}}))
+        if "en.wikipedia.org/w/api.php" in url: return Resp(200, json.dumps(["q", ["ISRO"], [""], ["https://en.wikipedia.org/wiki/ISRO"]]))
+        if "api/rest_v1/page/summary/" in url: return Resp(200, json.dumps({"title": "ISRO", "extract": "The Indian Space Research Organisation is India's national space agency.", "content_urls": {"desktop": {"page": "https://en.wikipedia.org/wiki/ISRO"}}}))
+        if "gdeltproject" in url:
+            if getattr(self, "gdelt_status", 200) != 200: return Resp(self.gdelt_status, "{}")
+            return Resp(200, json.dumps({"articles": [{"title": "ISRO announces new mission", "url": "https://www.rediff.com/news/isro.htm", "domain": "rediff.com", "seendate": "20261025120000"}]}))
         if "generateContent" in url:
             if self.stt_status != 200: return Resp(self.stt_status, "{}")
             return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
