@@ -42,6 +42,7 @@ class FakeHttp:
             if getattr(self, "gdelt_status", 200) != 200: return Resp(self.gdelt_status, "{}")
             return Resp(200, json.dumps({"articles": [{"title": "ISRO announces new mission", "url": "https://www.rediff.com/news/isro.htm", "domain": "rediff.com", "seendate": "20261025120000"}]}))
         if "generateContent" in url:
+            if getattr(self, "raise_on_gen", False): raise TimeoutError("simulated provider timeout")
             if self.stt_status != 200: return Resp(self.stt_status, "{}")
             return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
         if "auth_tokens" in url: return Resp(200, json.dumps({"name": "auth_tokens/deadbeef1234", "expireTime": "2099-01-01T00:00:00Z"}))
@@ -502,3 +503,23 @@ def test_live_token_rate_limited(app):
         assert run(app.handle("POST", "/v1/live/token", A, "{}"))[0] == 200
     st, body = run(app.handle("POST", "/v1/live/token", A, "{}"))
     assert st == 429 and body["bucket"] == "write"
+
+
+def test_pdf_ai_failure_recorded_and_honest(app):
+    import asyncio as _aio
+    H = {"X-Telegram-Bot-Api-Secret-Token": "s3"}
+    code = run(app.handle("POST", "/v1/telegram/pair/start", A, ""))[1]["code"]
+    def tg(i, text): return run(app.handle("POST", "/telegram/webhook", H, json.dumps({"update_id": i, "message": {"from": {"id": 42}, "chat": {"id": 42, "type": "private"}, "text": text, "date": int(time.time())}})))
+    tg(1, f"/pair {code}")
+    app.http.raise_on_gen = True
+    tg(2, "/pdf Python notes")
+    msgs = [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u]
+    assert any("Could not generate the document" in m and "AI error timeout" in m for m in msgs)
+    assert not [1 for m, _, _ in app.http.calls if m == "FILE"]  # fail-closed: no document sent
+    assert any(f["stage"] == "pdf_model" for f in app.state.core.fail_get())
+
+
+def test_pdf_prompt_bounded_length(app):
+    run(app._tg_process("ok", "/pdf notes", 42))
+    payloads = [k["json"] for _, u, k in app.http.calls if "generateContent" in u]
+    assert any("700 words" in p["contents"][-1]["parts"][0]["text"] for p in payloads)

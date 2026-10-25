@@ -894,8 +894,11 @@ class App:
                     elif not topic:
                         await self._tg_send(chat_id, "Usage: /pdf <what the document should contain>")
                     else:
-                        body = await self._gemini("Write a clear, well organised plain-text document (no markdown symbols) for: " + topic)
+                        # Bound the requested length: an unbounded document often outlives the per-attempt
+                        # window and the job budget, so every model times out and nothing is delivered.
+                        body = await self._gemini("Write a clear, well organised plain-text document (no markdown symbols), at most about 700 words, for: " + topic)
                         if not body:
+                            await self._fail("pdf_model", "none " + str(getattr(self, "last_gemini_status", "?")))
                             await self._tg_send(chat_id, "Could not generate the document right now (AI error " + str(getattr(self, "last_gemini_status", "?")) + "). Please try again in a minute.")
                         else:
                             try:
