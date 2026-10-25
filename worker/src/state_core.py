@@ -134,19 +134,43 @@ class Core:
     # -- failure ring buffer: metadata only (stage + status + ts), NEVER content/audio/transcripts.
     FAIL_CAP = 20
 
+    # Fixed keyword allowlist for failure classification. PRESENCE ONLY (booleans): a listed
+    # static keyword either appears in the provider error or it does not - the error text
+    # itself, and anything it echoes (prompts, URLs, tokens, input), is never persisted.
+    ERROR_KEYWORDS = (
+        ("TypeError", "TypeError"),
+        ("RangeError", "RangeError"),
+        ("network", "NetworkError"),
+        ("fetch_failed", "fetch failed"),
+        ("input_image", "input_image"),
+        ("size_512", "512"),
+        ("multipart", "multipart"),
+        ("boundary", "boundary"),
+        ("quota", "quota"),
+        ("rate_limit", "rate limit"),
+        ("dimension", "dimension"),
+        ("image_format", "decode"),
+    )
+
     @staticmethod
     def safe_error_meta(model, kind, ex):
         """Allowlisted structured failure metadata ONLY: model id, gen/edit kind, exception
-        CLASS name, and an HTTP-style numeric status code if one is extractable.
-        Never persists raw server error text: provider messages can echo prompts, URLs,
-        auth material or input data."""
+        CLASS name, an HTTP-style numeric status code if extractable, and boolean presence
+        of fixed static keywords. Never persists raw server error text: provider messages
+        can echo prompts, URLs, auth material or input data."""
         import re as _re
+        text = str(ex)
         code = getattr(ex, "status", None) or getattr(ex, "status_code", None)
         if not isinstance(code, int):
-            m = _re.search(r"\b([1-5]\d\d)\b", str(ex))
+            m = _re.search(r"\b([1-5]\d\d)\b", text)
             code = int(m.group(1)) if m else None
-        return "|".join([str(model)[:80], str(kind)[:8], type(ex).__name__[:40],
-                         "code=" + str(code) if code else "code=-"])
+        low = text.lower()
+        kws = [name for name, needle in Core.ERROR_KEYWORDS if needle.lower() in low]
+        parts = [str(model)[:80], str(kind)[:8], type(ex).__name__[:40],
+                 "code=" + str(code) if code else "code=-"]
+        if kws:
+            parts.append("kw=" + ",".join(kws))
+        return "|".join(parts)
 
     def fail_add(self, stage: str, status: str):
         fails = self.data.setdefault("fails", [])

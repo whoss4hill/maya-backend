@@ -310,3 +310,22 @@ def test_error_meta_never_persists_reflected_prompt_or_token():
     assert meta2.endswith("code=429") and "user prompt" not in meta2
     meta3 = Core.safe_error_meta("m", "gen", ValueError("no code at all, just text"))
     assert meta3.endswith("code=-")
+
+
+def test_error_meta_keyword_booleans_without_value_leakage():
+    from state_core import Core
+    secretish = "sk-live-TOKEN-999 and prompt 'draw my password is Hunter22abcd'"
+    ex = Exception("TypeError: multipart field input_image_0 rejected: " + secretish + " see https://x/?key=abc")
+    meta = Core.safe_error_meta("@cf/black-forest-labs/flux-2-klein-4b", "edit", ex)
+    assert "kw=" in meta
+    for name in ("TypeError", "multipart", "input_image"):
+        assert name in meta
+    for leaked in ("sk-live-TOKEN-999", "Hunter22", "key=abc", "draw my password"):
+        assert leaked not in meta
+    # keyword absence is also structured: a plain quota error shows quota only
+    ex2 = Exception("AiError 429: quota exceeded for this project")
+    meta2 = Core.safe_error_meta("m", "gen", ex2)
+    assert "code=429" in meta2 and "quota" in meta2 and "input_image" not in meta2
+    # no keywords -> no kw field at all
+    meta3 = Core.safe_error_meta("m", "gen", ValueError("totally plain"))
+    assert "kw=" not in meta3
