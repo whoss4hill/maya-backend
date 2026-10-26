@@ -87,6 +87,7 @@ class App:
         self.model = _env("GEMINI_MODEL", "gemini-3.6-flash")
         self.owner = _env("MAYA_OWNER_USER_ID").strip().lower()
         self.tg_token = _env("TELEGRAM_BOT_TOKEN")
+        self._pending_tool = {}  # chat_id -> one-shot tool plan awaiting exact owner confirmation (5 min)
         if not self.url or not self.anon or not self.gem_key:
             raise RuntimeError("missing SUPABASE_URL / SUPABASE_ANON_KEY / GEMINI_API_KEY")
         if _env("SUPABASE_SERVICE_ROLE_KEY"):
@@ -885,22 +886,156 @@ class App:
         else:
             await self._tg_process_inner(status, text, chat_id)
 
-    def _tool_reply(self, text):
-        """/mail and /gh: validate with the scoped logic; nothing is sent or pushed here. Honest status until credentials exist."""
+    async def _tool_reply(self, chat_id, text):
+        """/mail and /gh: scoped logic from gmail_tools/github_tools. Live paths run only when the
+        matching flag AND its token secret exist; otherwise an honest not-connected reply. A send or
+        push happens only after the owner's exact one-shot confirmation in this same chat."""
         if text.lower().startswith("/mail"):
-            c = gmail_tools.parse_command(text)
-            if c is None or c["op"] == "error":
-                return "Mail command samajh nahi aaya. Use: /mail, /mail from <naam>, /mail search <query>, /mail send to <email>: <text>"
-            if c["op"] == "draft":
-                return gmail_tools.draft_preview(c) + "\n\n(Gmail abhi connected nahi hai, isliye bhej nahi sakti.)"
-            return "Gmail abhi connected nahi hai. Pehle Gmail access setup hona baaki hai, mail nahi padh payi."
+            return await self._mail_reply(chat_id, text)
+        return await self._gh_reply(chat_id, text)
+
+    async def _gh_reply(self, chat_id, text):
         c = github_tools.parse_command(text)
         if c is None or c["op"] == "error":
             why = (c or {}).get("why", "format")
             return "GitHub command refused (" + why + "). Use: /gh read <repo> <branch> <path> ya /gh edit <repo> <branch> <path>: <kya badalna hai>. Sirf maya repos, main branch pe kabhi nahi."
-        if not os.environ.get("MAYA_GITHUB_ENABLED"):
+        if not _env("MAYA_GITHUB_ENABLED"):
             return "GitHub access abhi connected nahi hai. Command valid hai, par kuch padha/badla nahi."
+        tok = _env("MAYA_GITHUB_TOKEN")
+        if not tok:
+            return "GitHub ON hai par token secret set nahi hai. Kuch padha/badla nahi."
+        if c["op"] == "read":
+            await self._gh_read(chat_id, c, tok)
+            return None
+        self._pending_tool[chat_id] = {"kind": "gh", "ts": time.time(), "cmd": c}
         return github_tools.plan_preview(c)
+
+    async def _gh_read(self, chat_id, c, tok):
+        r = await self.http.get(github_tools.contents_url(c["repo"], c["branch"], c["path"]),
+                                headers=github_tools.api_headers(tok), timeout=self._clamped_timeout(8) or 8)
+        if getattr(r, "status_code", 0) == 404:
+            await self._tg_send(chat_id, "File nahi mili: " + c["path"] + " (" + c["branch"] + ").")
+            return
+        if getattr(r, "status_code", 0) != 200:
+            await self._fail("github_api", "code=" + str(r.status_code))
+            await self._tg_send(chat_id, "GitHub se file nahi padh payi (error " + str(r.status_code) + ").")
+            return
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        await self._tg_send_long(chat_id, c["repo"] + " @ " + c["branch"] + " : " + c["path"] + "\n\n" + github_tools.parse_read(data))
+
+    async def _gh_execute(self, chat_id, c, tok):
+        r = await self.http.get(github_tools.contents_url(c["repo"], c["branch"], c["path"]),
+                                headers=github_tools.api_headers(tok), timeout=self._clamped_timeout(8) or 8)
+        prev_sha, old = None, ""
+        if getattr(r, "status_code", 0) == 200:
+            try:
+                d = r.json()
+                prev_sha = d.get("sha")
+                old = github_tools.parse_read(d)
+            except Exception:
+                old = ""
+        elif getattr(r, "status_code", 0) != 404:
+            await self._fail("github_api", "code=" + str(r.status_code))
+            await self._tg_send(chat_id, "GitHub se current file nahi padh payi (error " + str(r.status_code) + "). Push nahi hua.")
+            return
+        new_text = await self._gemini(
+            "Apply this edit instruction to the file below and return ONLY the complete new file content, "
+            "no explanation, no code fences.\nInstruction: " + c["instruction"][:500] +
+            "\n\n--- CURRENT FILE (" + c["path"] + ") ---\n" + (old or "(file does not exist yet - create it)"))
+        if not new_text:
+            await self._fail("github_api", "edit_model none " + str(getattr(self, "last_gemini_status", "?")))
+            await self._tg_send(chat_id, "Edit generate nahi ho paya (AI error " + str(getattr(self, "last_gemini_status", "?")) + "). Push nahi hua.")
+            return
+        try:
+            body = github_tools.write_body(c["repo"], c["branch"], c["path"], new_text, "Maya: " + c["instruction"][:80], prev_sha)
+        except ValueError as e:
+            await self._tg_send(chat_id, "Push refused (" + str(e) + ").")
+            return
+        put_url = "https://api.github.com/repos/" + c["repo"] + "/contents/" + c["path"]
+        w = await self.http.put(put_url, headers=github_tools.api_headers(tok), json=body, timeout=self._clamped_timeout(10) or 10)
+        if getattr(w, "status_code", 0) in (200, 201):
+            await self._tg_send(chat_id, "Push ho gaya: " + c["repo"] + " @ " + c["branch"] + " : " + c["path"])
+        else:
+            await self._fail("github_api", "push code=" + str(w.status_code))
+            await self._tg_send(chat_id, "Push nahi hua (error " + str(w.status_code) + "). File me koi change nahi.")
+
+    async def _mail_reply(self, chat_id, text):
+        c = gmail_tools.parse_command(text)
+        if c is None or c["op"] == "error":
+            return "Mail command samajh nahi aaya. Use: /mail, /mail from <naam>, /mail search <query>, /mail send to <email>: <text>"
+        if not _env("MAYA_GMAIL_ENABLED"):
+            if c["op"] == "draft":
+                return gmail_tools.draft_preview(c) + "\n\n(Gmail abhi connected nahi hai, isliye bhej nahi sakti.)"
+            return "Gmail abhi connected nahi hai. Pehle Gmail access setup hona baaki hai, mail nahi padh payi."
+        tok = _env("MAYA_GMAIL_TOKEN")
+        if not tok:
+            return "Gmail ON hai par access token secret set nahi hai. Kuch padha/bheja nahi."
+        if c["op"] == "draft":
+            self._pending_tool[chat_id] = {"kind": "mail", "ts": time.time(), "cmd": c}
+            return gmail_tools.draft_preview(c)
+        await self._mail_list(chat_id, c, tok)
+        return None
+
+    async def _mail_list(self, chat_id, c, tok):
+        h = {"Authorization": "Bearer " + tok}
+        r = await self.http.get(gmail_tools.list_url(c["q"], c["max"]), headers=h, timeout=self._clamped_timeout(8) or 8)
+        if getattr(r, "status_code", 0) != 200:
+            await self._fail("gmail_api", "code=" + str(r.status_code))
+            extra = " Token expire ho sakta hai." if getattr(r, "status_code", 0) == 401 else ""
+            await self._tg_send(chat_id, "Gmail se mail nahi padh payi (error " + str(r.status_code) + ")." + extra)
+            return
+        try:
+            ids = [m.get("id") for m in (r.json().get("messages") or []) if isinstance(m, dict) and m.get("id")]
+        except Exception:
+            ids = []
+        msgs = []
+        for mid in ids[: c["max"]]:
+            try:
+                g = await self.http.get(gmail_tools.get_url(mid), headers=h, timeout=self._clamped_timeout(6) or 6)
+                if getattr(g, "status_code", 0) == 200:
+                    msgs.append(g.json())
+            except Exception:
+                continue
+        await self._tg_send_long(chat_id, gmail_tools.render(msgs))
+
+    async def _mail_execute(self, chat_id, c, tok):
+        import base64 as _b64
+        raw = ("To: " + c["to"] + "\r\nSubject: Maya se message\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + c["body"])
+        r = await self.http.post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                                 headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"},
+                                 json={"raw": _b64.urlsafe_b64encode(raw.encode()).decode()},
+                                 timeout=self._clamped_timeout(8) or 8)
+        if getattr(r, "status_code", 0) in (200, 201):
+            await self._tg_send(chat_id, "Mail bhej di gayi: " + c["to"])
+        else:
+            await self._fail("gmail_api", "send code=" + str(r.status_code))
+            await self._tg_send(chat_id, "Mail nahi bhej payi (error " + str(r.status_code) + "). Kuch nahi gaya.")
+
+    async def _tool_confirm(self, chat_id, word):
+        """Exact one-shot 'yes push' / 'yes send' from the bound owner chat executes the stored plan.
+        Plans older than 5 minutes are dropped, never executed late. Anything else falls through to chat."""
+        p = self._pending_tool.get(chat_id)
+        if not p:
+            return False
+        want = "yes push" if p["kind"] == "gh" else "yes send"
+        if word != want:
+            return False
+        self._pending_tool.pop(chat_id, None)
+        if time.time() - p["ts"] > 300:
+            await self._tg_send(chat_id, "Woh plan 5 minute se purana ho gaya. Command dobara bhejo, kuch execute nahi hua.")
+            return True
+        tok = _env("MAYA_GITHUB_TOKEN") if p["kind"] == "gh" else _env("MAYA_GMAIL_TOKEN")
+        if not tok:
+            await self._tg_send(chat_id, "Token abhi set nahi hai. Kuch execute nahi hua.")
+            return True
+        if p["kind"] == "gh":
+            await self._gh_execute(chat_id, p["cmd"], tok)
+        else:
+            await self._mail_execute(chat_id, p["cmd"], tok)
+        return True
 
     async def _tg_process_inner(self, status, text, chat_id):
         try:
@@ -912,6 +1047,8 @@ class App:
                 await self._tg_send(chat_id, secret_guard.NOTICE + " You may also delete that message from this chat.")
             elif status == "ok" and text:
                 low = text.lower()
+                if low.strip() in ("yes push", "yes send") and await self._tool_confirm(chat_id, low.strip()):
+                    return 200, {}
                 if low.startswith("/pdf"):
                     topic = text[4:].strip()
                     if unsupported_chars(topic):
@@ -1069,7 +1206,9 @@ class App:
                                 out = body.strip()[:3500] + ("\n\nSources:\n" + "\n".join(srcs) if srcs else "")
                                 await self._tg_send(chat_id, out[:4000])
                 elif low.startswith("/mail") or low.startswith("/gh"):
-                    await self._tg_send(chat_id, self._tool_reply(text))
+                    r = await self._tool_reply(chat_id, text)
+                    if r:
+                        await self._tg_send(chat_id, r)
                 else:
                     hist = []
                     try:

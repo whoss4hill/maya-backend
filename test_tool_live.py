@@ -1,0 +1,137 @@
+"""Live /gh and /mail execution paths behind MAYA_GITHUB_ENABLED / MAYA_GMAIL_ENABLED + token secrets.
+No real network: FakeHttp fakes GitHub/Gmail. Confirmations are exact, one-shot, owner-chat only."""
+import asyncio, json, os, time, base64, pytest
+from net import Resp
+from state_core import Core
+
+ENV = dict(SUPABASE_URL="https://x.supabase.co", SUPABASE_ANON_KEY="anon", GEMINI_API_KEY="g", MAYA_OWNER_USER_ID="aaa-1",
+           MAYA_TELEGRAM_ENABLED="1", MAYA_TELEGRAM_SECRET="s3", TELEGRAM_BOT_TOKEN="tok")
+
+class St:
+    def __init__(self): self.core = Core()
+    async def update(self, h, u): return self.core.telegram_update(h, u)
+    async def pair_start(self, target_id=None): return self.core.pair_start(target_id=target_id)
+    async def set_enabled(self, on): self.core.set_enabled(on)
+    async def voice_mode_get(self): return self.core.voice_mode
+    async def voice_mode_set(self, on): self.core.set_voice_mode(on)
+    async def image_mode_get(self): return self.core.image_mode
+    async def image_mode_set(self, on): self.core.set_image_mode(on)
+    async def fail_add(self, stage, status): self.core.fail_add(stage, status)
+    async def revoke(self): self.core.revoke()
+    async def model_pref_get(self): return self.core.model_pref
+    async def model_pref_set(self, v): self.core.set_model_pref(v)
+    async def rl_hit(self, bucket, limit): return self.core.rl_hit(bucket, limit)
+    async def bound(self): return self.core.bound_id
+    job = {}
+    async def job_set(self, s, n="", alarm_s=0): self.job = {"state": s, "note": n, "ts": time.time()}
+    async def job_get(self): return self.job
+    async def status(self): return {"bound": self.core.bound_id is not None, "enabled": self.core.data["tg"]["owner_enabled"], "bound_suffix": None}
+
+class FakeHttp:
+    def __init__(self): self.calls = []
+    async def _r(self, m, url, **k):
+        self.calls.append((m, url, k))
+        if url.endswith("/auth/v1/user"): return Resp(200, json.dumps({"id": "aaa-1"}))
+        if "api.github.com/repos/" in url and m == "GET":
+            return Resp(200, json.dumps({"type": "file", "size": 12, "sha": "abc123",
+                                         "content": base64.b64encode(b"old content").decode()}))
+        if "api.github.com/repos/" in url and m == "PUT":
+            return Resp(201, json.dumps({"content": {"path": "p"}}))
+        if "gmail.googleapis.com/gmail/v1/users/me/messages?maxResults" in url:
+            return Resp(200, json.dumps({"messages": [{"id": "aa11bb22"}, {"id": "cc33dd44"}]}))
+        if "/messages/" in url and "format=metadata" in url:
+            return Resp(200, json.dumps({"snippet": "Hello there", "payload": {"headers": [
+                {"name": "From", "value": "a@b.co"}, {"name": "Subject", "value": "Hi"}, {"name": "Date", "value": "Mon"}]}}))
+        if url.endswith("/messages/send"):
+            return Resp(200, json.dumps({"id": "sent1"}))
+        if "generateContent" in url:
+            return Resp(200, json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]}}]}))
+        return Resp(200, "[]")
+    async def get(self, u, **k): return await self._r("GET", u, **k)
+    async def post(self, u, **k): return await self._r("POST", u, **k)
+    async def put(self, u, **k): return await self._r("PUT", u, **k)
+    async def delete(self, u, **k): return await self._r("DELETE", u, **k)
+    async def get_bytes(self, u, **k): return 200, b"B"
+    async def post_file(self, url, fields, filename, data, mime="application/pdf", field="document"):
+        self.calls.append(("FILE", url, {"fields": fields})); return Resp(200, json.dumps({"ok": True, "result": {"message_id": 1}}))
+
+@pytest.fixture
+def app(monkeypatch):
+    for k, v in ENV.items(): monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    for k in ("MAYA_GITHUB_ENABLED", "MAYA_GITHUB_TOKEN", "MAYA_GMAIL_ENABLED", "MAYA_GMAIL_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    import importlib, edge; importlib.reload(edge)
+    return edge.App(http=FakeHttp(), state=St())
+
+def run(c): return asyncio.run(c)
+A = {"Authorization": "Bearer jwt"}
+H = {"X-Telegram-Bot-Api-Secret-Token": "s3"}
+
+def pair(app):
+    code = run(app.handle("POST", "/v1/telegram/pair/start", A, ""))[1]["code"]
+    tg(app, 1, f"/pair {code}")
+
+def tg(app, i, text, uid=42):
+    return run(app.handle("POST", "/telegram/webhook", H, json.dumps({"update_id": i, "message":
+        {"from": {"id": uid}, "chat": {"id": uid, "type": "private"}, "text": text, "date": int(time.time())}})))
+
+def sent(app):
+    return [k["json"]["text"] for _, u, k in app.http.calls if "sendMessage" in u and k.get("json")]
+
+def test_gh_read_connected(app, monkeypatch):
+    monkeypatch.setenv("MAYA_GITHUB_ENABLED", "1"); monkeypatch.setenv("MAYA_GITHUB_TOKEN", "ghtok")
+    pair(app); tg(app, 2, "/gh read whoss4hill/maya-app dev README.md")
+    assert "old content" in sent(app)[-1]
+    assert all("ghtok" not in t for t in sent(app))
+
+def test_gh_read_not_connected(app):
+    pair(app); tg(app, 2, "/gh read whoss4hill/maya-app dev README.md")
+    assert "connected nahi" in sent(app)[-1]
+    assert not any("api.github.com" in u for _, u, _ in app.http.calls)
+
+def test_gh_edit_plan_then_one_shot_push(app, monkeypatch):
+    monkeypatch.setenv("MAYA_GITHUB_ENABLED", "1"); monkeypatch.setenv("MAYA_GITHUB_TOKEN", "ghtok")
+    pair(app)
+    tg(app, 2, "/gh edit whoss4hill/maya-app dev a.txt: change it")
+    assert "NOT pushed" in sent(app)[-1]
+    assert not any(m == "PUT" for m, _, _ in app.http.calls)
+    tg(app, 3, "yes push")
+    puts = [k for m, u, k in app.http.calls if m == "PUT"]
+    assert len(puts) == 1 and base64.b64decode(puts[0]["json"]["content"]) == b"pong" and puts[0]["json"]["sha"] == "abc123"
+    tg(app, 4, "yes push")  # already consumed: must NOT push again
+    assert len([1 for m, _, _ in app.http.calls if m == "PUT"]) == 1
+
+def test_gh_guards_still_refuse(app, monkeypatch):
+    monkeypatch.setenv("MAYA_GITHUB_ENABLED", "1"); monkeypatch.setenv("MAYA_GITHUB_TOKEN", "ghtok")
+    pair(app)
+    tg(app, 2, "/gh edit whoss4hill/maya-app main a.txt: x")
+    assert "protected_branch" in sent(app)[-1]
+    assert not any("api.github.com" in u for _, u, _ in app.http.calls)
+
+def test_mail_list_connected(app, monkeypatch):
+    monkeypatch.setenv("MAYA_GMAIL_ENABLED", "1"); monkeypatch.setenv("MAYA_GMAIL_TOKEN", "gtok")
+    pair(app); tg(app, 2, "/mail")
+    assert "a@b.co" in sent(app)[-1] and "Hi" in sent(app)[-1]
+    assert all("gtok" not in t for t in sent(app))
+
+def test_mail_not_connected(app):
+    pair(app); tg(app, 2, "/mail")
+    assert "connected nahi" in sent(app)[-1]
+    assert not any("gmail.googleapis.com" in u for _, u, _ in app.http.calls)
+
+def test_mail_send_only_after_exact_confirm(app, monkeypatch):
+    monkeypatch.setenv("MAYA_GMAIL_ENABLED", "1"); monkeypatch.setenv("MAYA_GMAIL_TOKEN", "gtok")
+    pair(app)
+    tg(app, 2, "/mail send to x@y.com: hello ji")
+    assert "NOT sent" in sent(app)[-1]
+    assert not any(u.endswith("/messages/send") for _, u, _ in app.http.calls)
+    tg(app, 3, "yes push")  # wrong word: falls through to chat, nothing sent
+    assert not any(u.endswith("/messages/send") for _, u, _ in app.http.calls)
+    tg(app, 4, "/mail send to x@y.com: hello ji")  # fresh draft
+    tg(app, 5, "yes send")
+    sends = [k for _, u, k in app.http.calls if u.endswith("/messages/send")]
+    assert len(sends) == 1
+    raw = base64.urlsafe_b64decode(sends[0]["json"]["raw"]).decode()
+    assert "x@y.com" in raw and "hello ji" in raw
+    assert all("gtok" not in t for t in sent(app))

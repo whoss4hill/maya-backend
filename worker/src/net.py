@@ -112,6 +112,9 @@ class Http:
     async def get(self, url, **kw):
         return await self._request("GET", url, **kw)
 
+    async def put(self, url, **kw):
+        return await self._request("PUT", url, **kw)
+
     async def post(self, url, **kw):
         return await self._request("POST", url, **kw)
 
