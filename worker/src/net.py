@@ -29,7 +29,7 @@ class Http:
         self.timeout = timeout
         self._client = None
 
-    async def _request(self, method, url, headers=None, params=None, json=None, timeout=None):
+    async def _request(self, method, url, headers=None, params=None, json=None, form=None, timeout=None):
         if params:
             url = url + ("&" if "?" in url else "?") + urlencode(params)
         headers = dict(headers or {})
@@ -37,6 +37,9 @@ class Http:
         if json is not None:
             body = _json.dumps(json)
             headers.setdefault("Content-Type", "application/json")
+        if form is not None:
+            body = urlencode(form)
+            headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
         if ON_WORKERS:
             init = {"method": method, "headers": headers}
             if body is not None:

@@ -88,6 +88,7 @@ class App:
         self.owner = _env("MAYA_OWNER_USER_ID").strip().lower()
         self.tg_token = _env("TELEGRAM_BOT_TOKEN")
         self._pending_tool = {}  # chat_id -> one-shot tool plan awaiting exact owner confirmation (5 min)
+        self._gmail_token_cache = None  # {tok, exp}: short-lived OAuth access token exchanged from the refresh token
         if not self.url or not self.anon or not self.gem_key:
             raise RuntimeError("missing SUPABASE_URL / SUPABASE_ANON_KEY / GEMINI_API_KEY")
         if _env("SUPABASE_SERVICE_ROLE_KEY"):
@@ -888,12 +889,14 @@ class App:
 
     async def _tool_reply(self, chat_id, text):
         """/mail and /gh: scoped logic from gmail_tools/github_tools. Live paths run only when the
-        matching flag AND its token secret exist; otherwise an honest not-connected reply. A send or
-        push happens only after the owner's exact one-shot confirmation in this same chat."""
+        matching flag AND its credential secrets exist; otherwise an honest not-connected reply.
+        A push/send executes ONLY from the exact stored plan the owner previewed and confirmed in
+        this same chat (one-shot, 5 minutes) - never a regenerated or altered one."""
         if text.lower().startswith("/mail"):
             return await self._mail_reply(chat_id, text)
         return await self._gh_reply(chat_id, text)
 
+    # ---- GitHub (scoped: maya repos only, never protected branches, patch bound at preview) ----
     async def _gh_reply(self, chat_id, text):
         c = github_tools.parse_command(text)
         if c is None or c["op"] == "error":
@@ -907,8 +910,11 @@ class App:
         if c["op"] == "read":
             await self._gh_read(chat_id, c, tok)
             return None
-        self._pending_tool[chat_id] = {"kind": "gh", "ts": time.time(), "cmd": c}
-        return github_tools.plan_preview(c)
+        plan = await self._gh_build_plan(chat_id, c, tok)
+        if plan is None:
+            return None
+        self._pending_tool[chat_id] = plan
+        return plan["preview"]
 
     async def _gh_read(self, chat_id, c, tok):
         r = await self.http.get(github_tools.contents_url(c["repo"], c["branch"], c["path"]),
@@ -926,41 +932,101 @@ class App:
             data = {}
         await self._tg_send_long(chat_id, c["repo"] + " @ " + c["branch"] + " : " + c["path"] + "\n\n" + github_tools.parse_read(data))
 
-    async def _gh_execute(self, chat_id, c, tok):
+    async def _gh_fetch_current(self, c, tok):
+        """(sha, text) of the file now, or (None, "") when it does not exist; raises on API error."""
         r = await self.http.get(github_tools.contents_url(c["repo"], c["branch"], c["path"]),
                                 headers=github_tools.api_headers(tok), timeout=self._clamped_timeout(8) or 8)
-        prev_sha, old = None, ""
-        if getattr(r, "status_code", 0) == 200:
-            try:
-                d = r.json()
-                prev_sha = d.get("sha")
-                old = github_tools.parse_read(d)
-            except Exception:
-                old = ""
-        elif getattr(r, "status_code", 0) != 404:
-            await self._fail("github_api", "code=" + str(r.status_code))
-            await self._tg_send(chat_id, "GitHub se current file nahi padh payi (error " + str(r.status_code) + "). Push nahi hua.")
-            return
+        if getattr(r, "status_code", 0) == 404:
+            return None, ""
+        if getattr(r, "status_code", 0) != 200:
+            raise RuntimeError("github " + str(r.status_code))
+        try:
+            d = r.json()
+        except Exception:
+            d = {}
+        return d.get("sha"), github_tools.parse_read(d)
+
+    async def _gh_build_plan(self, chat_id, c, tok):
+        """Generate the exact patch at PREVIEW time and freeze it with the file's sha, so 'yes push'
+        can only ever push what the owner actually saw, and only if nothing changed since."""
+        import difflib
+        try:
+            sha, old = await self._gh_fetch_current(c, tok)
+        except RuntimeError as e:
+            code = str(e).split()[-1]
+            await self._fail("github_api", "code=" + code)
+            await self._tg_send(chat_id, "GitHub se current file nahi padh payi (error " + code + "). Plan nahi bana.")
+            return None
         new_text = await self._gemini(
             "Apply this edit instruction to the file below and return ONLY the complete new file content, "
             "no explanation, no code fences.\nInstruction: " + c["instruction"][:500] +
             "\n\n--- CURRENT FILE (" + c["path"] + ") ---\n" + (old or "(file does not exist yet - create it)"))
         if not new_text:
             await self._fail("github_api", "edit_model none " + str(getattr(self, "last_gemini_status", "?")))
-            await self._tg_send(chat_id, "Edit generate nahi ho paya (AI error " + str(getattr(self, "last_gemini_status", "?")) + "). Push nahi hua.")
+            await self._tg_send(chat_id, "Edit generate nahi ho paya (AI error " + str(getattr(self, "last_gemini_status", "?")) + "). Plan nahi bana.")
+            return None
+        diff = list(difflib.unified_diff(old.splitlines(), new_text.splitlines(), lineterm="", n=1))
+        shown = "\n".join(diff[:30])[:1500] if diff else "(koi text change nahi dikha)"
+        preview = ("Plan (NOT pushed)\n" + c["repo"] + " @ " + c["branch"] + "\n" + c["path"] + ": " + c["instruction"][:200] +
+                   "\n\nBadlav:\n" + shown +
+                   "\n\nYehi exact change push hoga, aur sirf tab jab file tab tak same rahe. Push ke liye 'yes push' likho (5 min).")
+        return {"kind": "gh", "ts": time.time(), "cmd": c, "prev_sha": sha, "new_text": new_text, "preview": preview}
+
+    async def _gh_execute(self, chat_id, plan, tok):
+        c = plan["cmd"]
+        try:
+            sha, _old = await self._gh_fetch_current(c, tok)
+        except RuntimeError as e:
+            code = str(e).split()[-1]
+            await self._fail("github_api", "code=" + code)
+            await self._tg_send(chat_id, "Push se pehle file dobara nahi padh payi (error " + code + "). Kuch nahi hua.")
+            return
+        if sha != plan["prev_sha"]:
+            await self._tg_send(chat_id, "File preview ke baad badal gayi hai, isliye purana plan cancel. Push nahi hua - command dobara bhejo.")
             return
         try:
-            body = github_tools.write_body(c["repo"], c["branch"], c["path"], new_text, "Maya: " + c["instruction"][:80], prev_sha)
+            body = github_tools.write_body(c["repo"], c["branch"], c["path"], plan["new_text"], "Maya: " + c["instruction"][:80], plan["prev_sha"])
         except ValueError as e:
             await self._tg_send(chat_id, "Push refused (" + str(e) + ").")
             return
-        put_url = "https://api.github.com/repos/" + c["repo"] + "/contents/" + c["path"]
-        w = await self.http.put(put_url, headers=github_tools.api_headers(tok), json=body, timeout=self._clamped_timeout(10) or 10)
+        w = await self.http.put("https://api.github.com/repos/" + c["repo"] + "/contents/" + c["path"],
+                                headers=github_tools.api_headers(tok), json=body, timeout=self._clamped_timeout(10) or 10)
         if getattr(w, "status_code", 0) in (200, 201):
             await self._tg_send(chat_id, "Push ho gaya: " + c["repo"] + " @ " + c["branch"] + " : " + c["path"])
         else:
             await self._fail("github_api", "push code=" + str(w.status_code))
             await self._tg_send(chat_id, "Push nahi hua (error " + str(w.status_code) + "). File me koi change nahi.")
+
+    # ---- Gmail (read-only OAuth design; live send needs the separate send-scope decision) ----
+    async def _gmail_access_token(self):
+        """Short-lived access token exchanged from the stored refresh token (never stored itself),
+        cached only in-memory until just before expiry. None when OAuth secrets are incomplete."""
+        cid, csec, rtok = _env("MAYA_GMAIL_CLIENT_ID"), _env("MAYA_GMAIL_CLIENT_SECRET"), _env("MAYA_GMAIL_REFRESH_TOKEN")
+        if not (cid and csec and rtok):
+            return None
+        cached = self._gmail_token_cache
+        if cached and time.time() < cached["exp"]:
+            return cached["tok"]
+        r = await self.http.post("https://oauth2.googleapis.com/token",
+                                 form={"client_id": cid, "client_secret": csec, "refresh_token": rtok,
+                                       "grant_type": "refresh_token"},
+                                 timeout=self._clamped_timeout(8) or 8)
+        if getattr(r, "status_code", 0) != 200:
+            await self._fail("gmail_auth", "code=" + str(r.status_code))
+            return None
+        try:
+            d = r.json()
+        except Exception:
+            return None
+        tok = d.get("access_token")
+        if not tok:
+            return None
+        try:
+            ttl = int(d.get("expires_in", 3600))
+        except Exception:
+            ttl = 3600
+        self._gmail_token_cache = {"tok": tok, "exp": time.time() + max(ttl - 300, 60)}
+        return tok
 
     async def _mail_reply(self, chat_id, text):
         c = gmail_tools.parse_command(text)
@@ -970,10 +1036,14 @@ class App:
             if c["op"] == "draft":
                 return gmail_tools.draft_preview(c) + "\n\n(Gmail abhi connected nahi hai, isliye bhej nahi sakti.)"
             return "Gmail abhi connected nahi hai. Pehle Gmail access setup hona baaki hai, mail nahi padh payi."
-        tok = _env("MAYA_GMAIL_TOKEN")
+        tok = await self._gmail_access_token()
         if not tok:
-            return "Gmail ON hai par access token secret set nahi hai. Kuch padha/bheja nahi."
+            return "Gmail ON hai par OAuth secrets (client id/secret/refresh token) poore set nahi hain ya token nahi mila. Kuch padha/bheja nahi."
         if c["op"] == "draft":
+            if not _env("MAYA_GMAIL_SEND_ENABLED"):
+                # Read-only Gmail design: no send execution, and NO stored draft - a later 'yes send'
+                # must never fire against a scope that was never granted.
+                return gmail_tools.draft_preview(c) + "\n\n(Live send abhi setup nahi hai - Gmail read-only scope hai. Send ke liye alag send-scope ka faisla baaki hai.)"
             self._pending_tool[chat_id] = {"kind": "mail", "ts": time.time(), "cmd": c}
             return gmail_tools.draft_preview(c)
         await self._mail_list(chat_id, c, tok)
@@ -984,7 +1054,7 @@ class App:
         r = await self.http.get(gmail_tools.list_url(c["q"], c["max"]), headers=h, timeout=self._clamped_timeout(8) or 8)
         if getattr(r, "status_code", 0) != 200:
             await self._fail("gmail_api", "code=" + str(r.status_code))
-            extra = " Token expire ho sakta hai." if getattr(r, "status_code", 0) == 401 else ""
+            extra = " Token expire ya access band ho sakta hai." if getattr(r, "status_code", 0) in (401, 403) else ""
             await self._tg_send(chat_id, "Gmail se mail nahi padh payi (error " + str(r.status_code) + ")." + extra)
             return
         try:
@@ -1010,6 +1080,9 @@ class App:
                                  timeout=self._clamped_timeout(8) or 8)
         if getattr(r, "status_code", 0) in (200, 201):
             await self._tg_send(chat_id, "Mail bhej di gayi: " + c["to"])
+        elif getattr(r, "status_code", 0) == 403:
+            await self._fail("gmail_api", "send code=403")
+            await self._tg_send(chat_id, "Is Gmail access me send ki permission nahi hai (read-only scope). Mail nahi gayi.")
         else:
             await self._fail("gmail_api", "send code=" + str(r.status_code))
             await self._tg_send(chat_id, "Mail nahi bhej payi (error " + str(r.status_code) + "). Kuch nahi gaya.")
@@ -1027,13 +1100,17 @@ class App:
         if time.time() - p["ts"] > 300:
             await self._tg_send(chat_id, "Woh plan 5 minute se purana ho gaya. Command dobara bhejo, kuch execute nahi hua.")
             return True
-        tok = _env("MAYA_GITHUB_TOKEN") if p["kind"] == "gh" else _env("MAYA_GMAIL_TOKEN")
-        if not tok:
-            await self._tg_send(chat_id, "Token abhi set nahi hai. Kuch execute nahi hua.")
-            return True
         if p["kind"] == "gh":
-            await self._gh_execute(chat_id, p["cmd"], tok)
+            tok = _env("MAYA_GITHUB_TOKEN")
+            if not tok:
+                await self._tg_send(chat_id, "Token abhi set nahi hai. Kuch execute nahi hua.")
+                return True
+            await self._gh_execute(chat_id, p, tok)
         else:
+            tok = await self._gmail_access_token()
+            if not tok:
+                await self._tg_send(chat_id, "Gmail token abhi nahi mila. Mail nahi gayi.")
+                return True
             await self._mail_execute(chat_id, p["cmd"], tok)
         return True
 
